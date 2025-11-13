@@ -6,10 +6,9 @@ from typing import Any, Dict, List, Callable
 from flask import Flask, request, jsonify
 import requests
 
-# --- CORREÇÃO DE IMPORTAÇÃO FINAL ---
-# Usamos o método mais estável de importar a biblioteca.
+# --- CORREÇÃO DE IMPORTAÇÃO CRÍTICA (Estável) ---
 from google.generativeai.types import HarmCategory, HarmBlockThreshold 
-from google.generativeai import types # Importamos como 'types'
+from google.generativeai import types # Importamos como 'types' para estabilidade
 # --- FIM DA CORREÇÃO ---
 
 
@@ -31,6 +30,17 @@ app = Flask(__name__)
 PROCESSED_IDS = deque(maxlen=500)
 CHAT_SESSIONS: Dict[str, List[str]] = {}
 CHAT_HISTORY_LENGTH = 10
+
+
+# ====== Utilidades WhatsApp (MOVIDO PARA CIMA PARA EVITAR NAMERROR) ======
+def extract_text(message: Dict[str, Any]) -> str:
+    """Extrai o texto de diversos tipos de mensagem do WhatsApp."""
+    if not isinstance(message, dict): return ""
+    if "conversation" in message: return (message.get("conversation") or "").strip()
+    if "extendedTextMessage" in message: return (message["extendedTextMessage"].get("text") or "").strip()
+    for mid in ("imageMessage", "videoMessage", "documentMessage", "audioMessage"):
+        if mid in message: return (message[mid].get("caption") or "").strip()
+    return ""
 
 
 # ======================================================================
@@ -272,10 +282,15 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
         app.logger.exception(f"[GEMINI] Erro geral ao gerar resposta: {e}")
         return "Desculpe, tive um problema para processar sua solicitação."
 
-# ====== Rota Webhook (LÓGICA PRINCIPAL) ======
+
+# ====== Rotas (RESTO DO CÓDIGO) ======
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({"status": "ok", "service": "vinnax-bot"}), 200
+
 @app.route("/webhook/messages-upsert", methods=["POST"])
 def webhook_messages_upsert():
-    # ... (Recebimento de dados) ...
+    # ... (Recebimento de dados e Extração de JID/Telefone) ...
     raw = request.get_json(silent=True) or {}
     envelope = raw.get("data", raw)
     if isinstance(envelope, list) and envelope: envelope = envelope[0]
