@@ -6,9 +6,14 @@ from typing import Any, Dict, List, Callable
 from flask import Flask, request, jsonify
 import requests
 
-# --- IMPORTAÇÃO CRÍTICA E ESTÁVEL ---
-from google.generativeai import types 
-# --- FIM DA IMPORTAÇÃO ---
+# --- CORREÇÃO DE IMPORTAÇÃO CRÍTICA (IMPORTAÇÃO CORRETA E NO TOPO) ---
+try:
+    from google import generativeai as genai
+    from google.generativeai import types as genai_types
+except ImportError:
+    genai = None
+    genai_types = None
+# --- FIM DA CORREÇÃO ---
 
 
 # ====== Config (via variáveis de ambiente) ======
@@ -17,7 +22,7 @@ EVOLUTION_URL_BASE = os.environ.get("EVOLUTION_URL_BASE", "")
 EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "models/gemini-1.5-pro-latest")
+GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "models/gemini-2.5-flash") # Usando 2.5-flash do seu ambiente
 
 # --- SUAS APIS (ENDPOINTS) ---
 LOVABLE_API_KEY = os.environ.get("LOVABLE_API_KEY", "") 
@@ -34,7 +39,7 @@ CHAT_SESSIONS: Dict[str, List[str]] = {}
 CHAT_HISTORY_LENGTH = 10
 
 
-# ====== Utilidades WhatsApp (NO TOPO) ======
+# ====== Utilidades (MOVIDAS PARA O TOPO) ======
 def extract_text(message: Dict[str, Any]) -> str:
     """Extrai o texto de diversos tipos de mensagem do WhatsApp."""
     if not isinstance(message, dict): return ""
@@ -53,7 +58,7 @@ def get_auth_headers():
 
 
 # ======================================================================
-# PASSO 2: AS FUNÇÕES REAIS DA API (CORREÇÃO DE SINTAXE APLICADA AQUI)
+# PASSO 2: AS FUNÇÕES REAIS DA API (TODAS ACIMA DO ROUTER)
 # ======================================================================
 
 # --- FUNÇÕES DE CLIENTE (5) ---
@@ -62,7 +67,7 @@ def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None) -
     try:
         payload = {"name": nome, "phone": telefone, "email": email}
         payload = {k: v for k, v in payload.items() if v is not None} 
-        response = requests.post(CLIENTE_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=20) # Corrigido: Linha separada
+        response = requests.post(CLIENTE_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao criar cliente: {e}"}
@@ -90,7 +95,7 @@ def call_api_atualizar_cliente(id_cliente: int, nome: str = None, telefone: str 
         url = f"{CLIENTE_API_ENDPOINT}/{id_cliente}"
         payload = {"name": nome, "phone": telefone, "email": email}
         payload = {k: v for k, v in payload.items() if v is not None}
-        response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20) # Corrigido: Linha separada
+        response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20) 
         response.raise_for_status()
         return response.json()
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao atualizar cliente: {e}"}
@@ -134,7 +139,7 @@ def call_api_atualizar_produto(id_produto: int, nome: str = None, tipo: str = No
         url = f"{PRODUTO_API_ENDPOINT}/{id_produto}"
         payload = {"name": nome, "type": tipo, "price": preco}
         payload = {k: v for k, v in payload.items() if v is not None}
-        response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20) # Corrigido: Linha separada
+        response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20) 
         response.raise_for_status()
         return response.json()
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao atualizar produto: {e}"}
@@ -154,7 +159,7 @@ def call_api_criar_os(client_id: str, product_id: str, description: str, total_p
     try:
         payload = {"client_id": client_id, "product_id": product_id, "description": description, "total_price": total_price, "deadline": deadline}
         payload = {k: v for k, v in payload.items() if v is not None}
-        response = requests.post(OS_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=20) # Corrigido: Linha separada
+        response = requests.post(OS_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=20) 
         response.raise_for_status()
         return response.json()
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao criar OS: {e}"}
@@ -179,7 +184,7 @@ def call_api_atualizar_os(id_os: str, status: str = None, total_price: float = N
         url = f"{OS_API_ENDPOINT}/{id_os}"
         payload = {"status": status, "total_price": total_price}
         payload = {k: v for k, v in payload.items() if v is not None}
-        response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20) # Corrigido: Linha separada
+        response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20) 
         response.raise_for_status()
         return response.json()
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao atualizar OS: {e}"}
@@ -226,7 +231,7 @@ def call_api_atualizar_orcamento(id_orcamento: str, quoted_price: float = None, 
         url = f"{ORCAMENTO_API_ENDPOINT}/{id_orcamento}"
         payload = {"quoted_price": quoted_price, "status": status}
         payload = {k: v for k, v in payload.items() if v is not None}
-        response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20) # Corrigido: Linha separada
+        response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao atualizar orçamento: {e}"}
@@ -296,11 +301,11 @@ TOOL_ROUTER: Dict[str, Callable[..., Dict[str, Any]]] = {
 }
 
 
-# ====== Inicialização do Gemini (Mantida) ======
+# ====== Inicialização do Gemini (USANDO O genai CORRIGIDO) ======
 gemini_model = None
-if GEMINI_API_KEY:
+if GEMINI_API_KEY and genai:
     try:
-        from google import generativeai as genai
+        if genai_types is None: raise ImportError("genai_types is None") # Garante que a importação funcionou
         genai.configure(api_key=GEMINI_API_KEY)
         gemini_model = genai.GenerativeModel(
             GEMINI_MODEL_NAME,
@@ -310,14 +315,16 @@ if GEMINI_API_KEY:
     except Exception as e:
         app.logger.exception(f"[GEMINI] Erro ao inicializar SDK: {e}")
 else:
-    app.logger.warning("[GEMINI] GEMINI_API_KEY não configurada.")
+    app.logger.warning("[GEMINI] GEMINI_API_KEY ou biblioteca não configurada.")
 
 
 # ======================================================================
-# LÓGICA DE RESPOSTA DO BOT (MANTIDA)
+# LÓGICA DE RESPOSTA DO BOT (COM PROMPT FOCADO NO CLIENTE)
 # ======================================================================
 def answer_with_gemini(user_text: str, chat_history: List[str], initial_context: str = "") -> str:
-    if not gemini_model: return f"Olá! Recebi sua mensagem: {user_text}"
+    if not gemini_model: 
+        # Mensagem de fallback, se o Gemini não inicializar (o que causou o erro)
+        return "Olá! Que bom ter você aqui. Estou com uma pequena dificuldade para acessar minhas ferramentas de inteligência, mas me diga: qual é o seu nome e como posso te ajudar hoje?"
     try:
         # --- PROMPT DO SISTEMA FINAL E SEGURO (Focado em Vendas e Atendimento) ---
         system_prompt = (
@@ -345,7 +352,7 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
         
         if candidate.finish_reason == "TOOL_USE":
             app.logger.info("[GEMINI] Pedido de 'Tool Use' detectado.")
-            function_call: types.FunctionCall = candidate.content.parts[0].function_call
+            function_call: genai_types.FunctionCall = candidate.content.parts[0].function_call
             tool_name = function_call.name
             tool_args = function_call.args
             
@@ -371,7 +378,7 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
         return "Desculpe, tive um problema para processar sua solicitação."
 
 
-# ====== Rotas (Mantidas) ======
+# ====== Rotas (MANTIDAS) ======
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"status": "ok", "service": "vinnax-bot"}), 0
@@ -380,7 +387,7 @@ def home():
 def webhook_messages_upsert():
     raw = request.get_json(silent=True) or {}
     envelope = raw.get("data", raw)
-    if isinstance(envelope, list) and envelope: return jsonify({"status": "bad_payload"}), 0
+    if isinstance(envelope, list) and envelope: envelope = envelope[0]
     if not isinstance(envelope, dict): return jsonify({"status": "bad_payload"}), 0
     key = envelope.get("key", {}) or {}
     if key.get("fromMe") is True: return jsonify({"status": "own_message_ignored"}), 0
@@ -402,15 +409,20 @@ def webhook_messages_upsert():
     current_history = CHAT_SESSIONS[number]
     
     initial_context = ""
+    # --- CORREÇÃO DA LÓGICA DE CONTEXTO ---
     if not current_history: 
         search_result = call_api_consultar_cliente_por_telefone(client_phone)
         if search_result.get("status") == "nao_encontrado":
+            # O cliente não existe. O bot deve pedir o nome para cadastrar.
             initial_context = f"AVISO: O sistema não encontrou nenhum cliente associado ao telefone {client_phone}. Peça o nome para cadastrar."
         elif search_result.get("status") == "erro":
+             # Houve um erro na API, mas o bot tem o telefone.
              initial_context = f"AVISO: O sistema não pôde buscar clientes devido a um erro na API."
         else:
+            # Cliente ENCONTRADO. O bot não deve pedir o telefone ou nome.
             client_name = search_result.get("name") or "Cliente" 
             initial_context = f"CONTEXTO INICIAL: O número de telefone {client_phone} pertence ao cliente '{client_name}' (ID {search_result.get('id')}). O bot DEVE usar o nome do cliente na resposta e NÃO DEVE perguntar o telefone novamente."
+    # --- FIM DA CORREÇÃO DE CONTEXTO ---
     
     reply = answer_with_gemini(text, current_history, initial_context)
     
