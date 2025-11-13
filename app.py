@@ -2,14 +2,16 @@ import os
 import json
 from collections import deque
 from typing import Any, Dict, List, Callable
+import threading # Novo: Para processamento assíncrono
 
 from flask import Flask, request, jsonify
 import requests
 
-# --- CORREÇÃO DE IMPORTAÇÃO CRÍTICA (Importação estável) ---
+# --- CORREÇÃO DE IMPORTAÇÃO CRÍTICA (Downgrade para versão 0.3.0) ---
 try:
-    from google import generativeai as genai
-    from google.generativeai import types
+    # A partir da v0.3.0, a sintaxe de importação é mais estável.
+    from google import genai
+    from google.genai import types
 except ImportError:
     genai = None
     types = None
@@ -22,7 +24,8 @@ EVOLUTION_URL_BASE = os.environ.get("EVOLUTION_URL_BASE", "")
 EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "models/gemini-2.5-flash") 
+# Usando gemini-pro pois é mais robusto na versão antiga 
+GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "models/gemini-pro") 
 
 # --- SUAS APIS (ENDPOINTS) ---
 LOVABLE_API_KEY = os.environ.get("LOVABLE_API_KEY", "") 
@@ -59,6 +62,7 @@ def get_auth_headers():
 
 # ======================================================================
 # PASSO 2: AS FUNÇÕES REAIS DA API (CORRIGIDAS E REORGANIZADAS)
+# (TODAS AS 20 FUNÇÕES DE API FICAM AQUI)
 # ======================================================================
 
 # --- FUNÇÕES DE CLIENTE (5) ---
@@ -260,19 +264,19 @@ TOOLS_MENU = [
     # --- PRODUTOS (5) ---
     {"name": "criar_produto", "description": "Cadastra um novo item no estoque de produtos. Requer nome, tipo e preço.", "parameters": {"type_": "OBJECT", "properties": {"nome": {"type": "STRING"}, "tipo": {"type": "STRING"}, "preco": {"type": "NUMBER"}}, "required": ["nome", "tipo", "preco"]}},
     {"name": "consultar_produto_por_id", "description": "Busca os detalhes de um produto (nome, preço, tipo) usando o ID do produto.", "parameters": {"type_": "OBJECT", "properties": {"id_produto": {"type": "INTEGER"}}, "required": ["id_produto"]}},
-    {"name": "consultar_produtos_todos", "description": "Lista todos os produtos cadastrados no estoque.", "parameters": {"type_": "OBJECT", "properties": {}}},
-    {"name": "atualizar_produto", "description": "Modifica informações de um produto existente usando o ID. Use apenas os campos a serem alterados.", "parameters": {"type_": "OBJECT", "properties": {"id_produto": {"type": "INTEGER"}, "nome": {"type": "STRING"}, "tipo": {"type": "STRING"}, "preco": {"type": "NUMBER"}}, "required": ["id_produto"]}},
+    {"name": "consultar_produtos_todos", "description": "Lista todos os produtos cadastrados no estoque.", "parameters": {"type": "OBJECT", "properties": {}}},
+    {"name": "atualizar_produto", "description": "Modifica informações de um produto existente usando o ID. Use apenas os campos a serem alterados.", "parameters": {"type": "OBJECT", "properties": {"id_produto": {"type": "INTEGER"}, "nome": {"type": "STRING"}, "tipo": {"type": "STRING"}, "preco": {"type": "NUMBER"}}, "required": ["id_produto"]}},
     {"name": "excluir_produto", "description": "Deleta permanentemente um produto do estoque usando o ID do produto.", "parameters": {"type_": "OBJECT", "properties": {"id_produto": {"type": "INTEGER"}}, "required": ["id_produto"]}},
     # --- ORDEM DE SERVIÇO (OS) (5) ---
     {"name": "criar_ordem_servico", "description": "Cria uma nova Ordem de Serviço (OS) no sistema. Necessita do ID do cliente e ID do produto.", "parameters": {"type_": "OBJECT", "properties": {"client_id": {"type": "STRING"}, "product_id": {"type": "STRING"}, "description": {"type": "STRING"}, "total_price": {"type": "NUMBER"}, "deadline": {"type": "STRING", "description": "Formato YYYY-MM-DD"}}, "required": ["client_id", "product_id", "description", "total_price"]}},
-    {"name": "consultar_ordem_servico_por_id", "description": "Busca os detalhes de uma Ordem de Serviço (OS) usando o ID da OS.", "parameters": {"type_": "OBJECT", "properties": {"id_os": {"type": "STRING"}}, "required": ["id_os"]}},
+    {"name": "consultar_ordem_servico_por_id", "description": "Busca os detalhes de uma Ordem de Serviço (OS) usando o ID da OS.", "parameters": {"type": "OBJECT", "properties": {"id_os": {"type": "STRING"}}, "required": ["id_os"]}},
     {"name": "consultar_ordens_servico_todas", "description": "Lista todas as Ordens de Serviço (OS) cadastradas no sistema.", "parameters": {"type_": "OBJECT", "properties": {}}},
     {"name": "atualizar_ordem_servico", "description": "Modifica informações de uma Ordem de Serviço (OS) existente (ex: status, preço) usando o ID da OS.", "parameters": {"type_": "OBJECT", "properties": {"id_os": {"type": "STRING"}, "status": {"type": "STRING"}, "total_price": {"type": "NUMBER"}}, "required": ["id_os"]}},
     {"name": "excluir_ordem_servico", "description": "Deleta permanentemente uma Ordem de Serviço (OS) do sistema usando o ID da OS.", "parameters": {"type_": "OBJECT", "properties": {"id_os": {"type": "STRING"}}, "required": ["id_os"]}},
     # --- ORÇAMENTOS (5) ---
     {"name": "criar_orcamento", "description": "Cria um novo orçamento no sistema. Necessita do ID do cliente e ID do produto/serviço.", "parameters": {"type_": "OBJECT", "properties": {"client_id": {"type": "STRING"}, "product_id": {"type": "STRING"}, "description": {"type": "STRING"}}, "required": ["client_id", "product_id", "description"]}},
     {"name": "consultar_orcamento_por_id", "description": "Busca os detalhes de um orçamento (preço cotado, status) usando o ID do orçamento.", "parameters": {"type_": "OBJECT", "properties": {"id_orcamento": {"type": "STRING", "description": "O ID (UUID) do Orçamento."}}, "required": ["id_orcamento"]}},
-    {"name": "consultar_orcamentos_todos", "description": "Lista todos os orçamentos cadastrados no sistema.", "parameters": {"type": "OBJECT", "properties": {}}},
+    {"name": "consultar_orcamentos_todos", "description": "Lista todos os orçamentos cadastrados no sistema.", "parameters": {"type_": "OBJECT", "properties": {}}},
     {"name": "atualizar_orcamento", "description": "Modifica o preço ou status de um orçamento existente. O preço cotado é o 'quoted_price'.", "parameters": {"type_": "OBJECT", "properties": {"id_orcamento": {"type": "STRING"}, "quoted_price": {"type": "NUMBER"}, "status": {"type": "STRING"}}, "required": ["id_orcamento"]}},
     {"name": "excluir_orcamento", "description": "Deleta permanentemente um orçamento do sistema usando o ID.", "parameters": {"type_": "OBJECT", "properties": {"id_orcamento": {"type": "STRING", "description": "O ID (UUID) do orçamento a ser excluído."}}, "required": ["id_orcamento"]}}
 ]
@@ -351,7 +355,7 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
         
         if candidate.finish_reason == "TOOL_USE":
             app.logger.info("[GEMINI] Pedido de 'Tool Use' detectado.")
-            function_call: types.FunctionCall = candidate.content.parts[0].function_call # Usa types do novo import
+            function_call: types.FunctionCall = candidate.content.parts[0].function_call
             tool_name = function_call.name
             tool_args = function_call.args
             
@@ -382,59 +386,72 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
 def home():
     return jsonify({"status": "ok", "service": "vinnax-bot"}), 0
 
-@app.route("/webhook/messages-upsert", methods=["POST"])
-def webhook_messages_upsert():
-    raw = request.get_json(silent=True) or {}
-    envelope = raw.get("data", raw)
-    if isinstance(envelope, list) and envelope: envelope = envelope[0]
-    if not isinstance(envelope, dict): return jsonify({"status": "bad_payload"}), 0
-    key = envelope.get("key", {}) or {}
-    if key.get("fromMe") is True: return jsonify({"status": "own_message_ignored"}), 0
-    message = envelope.get("message", {}) or {}
-    if not message: return jsonify({"status": "no_message_ignored"}), 0
-    msg_id = key.get("id") or envelope.get("idMessage") or ""
-    if msg_id:
-        if msg_id in PROCESSED_IDS: return jsonify({"status": "duplicate_ignored"}), 0
-        PROCESSED_IDS.append(msg_id)
-    
-    jid = (key.get("remoteJid") or envelope.get("participant") or "").strip()
-    if not jid.endswith("@s.whatsapp.net"): return jsonify({"status": "non_user_ignored"}), 0
-    client_phone = jid.replace("@s.whatsapp.net", "") 
-    
-    number = client_phone 
-    text = extract_text(message).strip()
-    if not text: return jsonify({"status": "no_text_ignored"}), 0
-    if number not in CHAT_SESSIONS: CHAT_SESSIONS[number] = []
-    current_history = CHAT_SESSIONS[number]
-    
-    initial_context = ""
-    if not current_history: 
-        search_result = call_api_consultar_cliente_por_telefone(client_phone)
-        if search_result.get("status") == "nao_encontrado":
-            initial_context = f"AVISO: O sistema não encontrou nenhum cliente associado ao telefone {client_phone}. Peça o nome para cadastrar."
-        elif search_result.get("status") == "erro":
-             initial_context = f"AVISO: O sistema não pôde buscar clientes devido a um erro na API."
-        else:
-            client_name = search_result.get("name") or "Cliente" 
-            initial_context = f"CONTEXTO INICIAL: O número de telefone {client_phone} pertence ao cliente '{client_name}' (ID {search_result.get('id')}). O bot DEVE usar o nome do cliente na resposta e NÃO DEVE perguntar o telefone novamente."
-    
-    reply = answer_with_gemini(text, current_history, initial_context)
-    
-    CHAT_SESSIONS[number].append(f"Cliente: {text}")
-    CHAT_SESSIONS[number].append(f"Atendente: {reply}")
-    while len(CHAT_SESSIONS[number]) > CHAT_HISTORY_LENGTH:
-        CHAT_SESSIONS[number].pop(0)
-
-    if not (EVOLUTION_KEY and EVOLUTION_URL_BASE and EVOLUTION_INSTANCE):
-        app.logger.warning("[EVOLUTION] Variáveis de ambiente ausentes.")
-        return jsonify({"status": "missing_env"}), 0
-    
+# --- Processamento Assíncrono para prevenir loops ---
+def process_message(data):
+    # A lógica de processamento do webhook (a parte que demora)
     try:
+        envelope = data.get("data", data)
+        if isinstance(envelope, list) and envelope: envelope = envelope[0]
+        if not isinstance(envelope, dict): return 
+        key = envelope.get("key", {}) or {}
+        if key.get("fromMe") is True: return 
+        message = envelope.get("message", {}) or {}
+        if not message: return 
+        
+        # Lógica de Deduplicação
+        msg_id = key.get("id") or envelope.get("idMessage") or ""
+        if msg_id and msg_id in PROCESSED_IDS: return 
+        if msg_id: PROCESSED_IDS.append(msg_id)
+        
+        jid = (key.get("remoteJid") or envelope.get("participant") or "").strip()
+        if not jid.endswith("@s.whatsapp.net"): return 
+        client_phone = jid.replace("@s.whatsapp.net", "") 
+        
+        number = client_phone 
+        text = extract_text(message).strip()
+        if not text: return 
+        if number not in CHAT_SESSIONS: CHAT_SESSIONS[number] = []
+        current_history = CHAT_SESSIONS[number]
+        
+        initial_context = ""
+        # Chamada de API para contexto é mantida aqui
+        if not current_history: 
+            search_result = call_api_consultar_cliente_por_telefone(client_phone)
+            if search_result.get("status") == "nao_encontrado":
+                initial_context = f"AVISO: O sistema não encontrou nenhum cliente associado ao telefone {client_phone}. Peça o nome para cadastrar."
+            elif search_result.get("status") == "erro":
+                 initial_context = f"AVISO: O sistema não pôde buscar clientes devido a um erro na API."
+            else:
+                client_name = search_result.get("name") or "Cliente" 
+                initial_context = f"CONTEXTO INICIAL: O número de telefone {client_phone} pertence ao cliente '{client_name}' (ID {search_result.get('id')}). O bot DEVE usar o nome do cliente na resposta e NÃO DEVE perguntar o telefone novamente."
+        
+        reply = answer_with_gemini(text, current_history, initial_context)
+        
+        CHAT_SESSIONS[number].append(f"Cliente: {text}")
+        CHAT_SESSIONS[number].append(f"Atendente: {reply}")
+        while len(CHAT_SESSIONS[number]) > CHAT_HISTORY_LENGTH:
+            CHAT_SESSIONS[number].pop(0)
+
+        if not (EVOLUTION_KEY and EVOLUTION_URL_BASE and EVOLUTION_INSTANCE):
+            app.logger.warning("[EVOLUTION] Variáveis de ambiente ausentes.")
+            return 
+        
         url_send = f"{EVOLUTION_URL_BASE}/message/sendtext/{EVOLUTION_INSTANCE}"
         headers = {"apikey": EVOLUTION_KEY, "Content-Type": "application/json"}
         payload = {"number": number, "text": reply}
         res = requests.post(url_send, json=payload, headers=headers, timeout=20)
         app.logger.info(f"[EVOLUTION] {res.status_code} -> {res.text}")
     except Exception as e:
-        app.logger.exception(f"[EVOLUTION] Erro ao enviar: {e}")
-    return jsonify({"status": "ok"}), 0
+        app.logger.exception(f"[PROCESSOR] Erro no processamento assíncrono: {e}")
+
+
+@app.route("/webhook/messages-upsert", methods=["POST"])
+def webhook_messages_upsert():
+    # Retorno imediato (200 OK) para evitar reenvio do Evolution
+    data = request.get_json(silent=True) or {}
+    
+    # Inicia o processamento pesado em segundo plano
+    threading.Thread(target=process_message, args=(data,)).start()
+
+    # Resposta imediata para evitar timeouts do Evolution
+    return jsonify({"status": "processing_async"}), 200
