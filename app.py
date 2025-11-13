@@ -11,7 +11,7 @@ EVOLUTION_KEY       = os.environ.get("87DBDCBDE4D8-414B-BFDD-7FFE386B673B", "")
 EVOLUTION_URL_BASE  = os.environ.get("https://evorv.conectarioverde.com.br", "")
 EVOLUTION_INSTANCE  = os.environ.get("VINNAXBEAUTY", "")
 
-GEMINI_API_KEY      = os.environ.get("AIzaSyAQCVOeLLso3TanMAgzVMeadIcbS__5x0o", "")
+GEMINI_API_KEY = os.environ.get("AIzaSyAQCVOeLLso3TanMAgzVMeadIcbS__5x0o", "")
 # você pode trocar o modelo apenas ajustando a env var no Render
 GEMINI_MODEL        = os.environ.get("GEMINI_MODEL", "models/gemini-2.5-flash")
 
