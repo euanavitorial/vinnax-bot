@@ -5,12 +5,22 @@ from typing import Any, Dict, List, Callable
 
 from flask import Flask, request, jsonify
 import requests
+
+# --- CORREÇÃO DE IMPORTAÇÃO CRÍTICA ---
+# Esta é uma importação de último recurso para garantir que o código funcione
+# com diferentes versões da biblioteca google-generativeai.
+try:
+    from google.genai.types import FunctionCall
+except ImportError:
+    try:
+        from google.generativeai.types.content_types import FunctionCall
+    except ImportError:
+        # Tenta a importação antiga que causou o erro (para compatibilidade)
+        from google.generativeai.types import FunctionCall 
+
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
-# --- CORREÇÃO DO BUG AQUI ---
-from google.genai.types import FunctionCall
 # --- FIM DA CORREÇÃO ---
 
-# ... (O resto das configurações de Evolution e Gemini permanecem as mesmas)
 
 # ====== Config (via variáveis de ambiente) ======
 EVOLUTION_KEY = os.environ.get("EVOLUTION_KEY", "")
@@ -21,7 +31,6 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "models/gemini-1.5-pro-latest")
 
 LOVABLE_API_KEY = os.environ.get("LOVABLE_API_KEY", "") 
-
 CLIENTE_API_ENDPOINT = os.environ.get("CLIENTE_API_ENDPOINT", "https://ebiitbpdvskreiuoeyaz.supabase.co/functions/v1/api-clients")
 LANCAMENTO_API_ENDPOINT = os.environ.get("LANCAMENTO_API_ENDPOINT", "https://api.seusistema.com/v1/lancamentos")
 
@@ -32,11 +41,11 @@ PROCESSED_IDS = deque(maxlen=500)
 CHAT_SESSIONS: Dict[str, List[str]] = {}
 CHAT_HISTORY_LENGTH = 10
 
+
 # ======================================================================
-# PASSO 1: O "MENU" DE FERRAMENTAS PARA O GEMINI (AGORA COM BUSCA POR TELEFONE)
+# PASSO 1: O "MENU" DE FERRAMENTAS PARA O GEMINI (5 Funções de Cliente)
 # ======================================================================
 TOOLS_MENU = [
-    # --- CLIENTE (5 FUNÇÕES AGORA) ---
     {
         "name": "criar_cliente",
         "description": "Cadastra um novo cliente no sistema. Requer nome e pelo menos telefone ou email.",
@@ -63,7 +72,7 @@ TOOLS_MENU = [
     },
     {
         "name": "consultar_cliente_por_telefone",
-        "description": "Busca os detalhes de um cliente usando o número de telefone fornecido pelo WhatsApp.",
+        "description": "Busca os detalhes de um cliente usando o número de telefone. Use para verificar se um novo cliente já está cadastrado.",
         "parameters": {
             "type_": "OBJECT",
             "properties": {
@@ -97,12 +106,11 @@ TOOLS_MENU = [
             "required": ["id_cliente"]
         }
     }
-    # ADICIONE AQUI AS FERRAMENTAS DE LANÇAMENTO FINANCEIRO, ESTOQUE, etc.
 ]
 
 
 # ======================================================================
-# PASSO 2: AS FUNÇÕES REAIS DA API (AGORA COM BUSCA POR TELEFONE)
+# PASSO 2: AS FUNÇÕES REAIS DA API (IMPLEMENTAÇÃO)
 # ======================================================================
 def get_auth_headers():
     """Retorna o cabeçalho de autenticação para as APIs do Lovable."""
@@ -147,17 +155,11 @@ def call_api_consultar_cliente_por_telefone(telefone: str) -> Dict[str, Any]:
         return {"status": "erro", "mensagem": "API de Cliente não configurada."}
 
     try:
-        # A sua API LISTAR TODOS OS CLIENTES está em CLIENTE_API_ENDPOINT (sem /id)
-        # Vamos buscar toda a lista e filtrar localmente, já que a API não oferece um filtro.
-        # SE SUA API SUPORTAR FILTRO POR /api-clients?phone=... , USE O FILTRO DIRETO.
-        
+        # Assume-se que a API retorna todos os clientes (sem filtro na URL)
         response = requests.get(CLIENTE_API_ENDPOINT, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         
-        # Assume-se que a API retorna uma lista de clientes
         clientes = response.json() 
-        
-        # Filtra a lista pelo telefone
         cliente_encontrado = [c for c in clientes if c.get('phone') == telefone]
         
         if cliente_encontrado:
@@ -199,32 +201,131 @@ def call_api_excluir_cliente(id_cliente: int) -> Dict[str, Any]:
         return response.json()
     except Exception as e:
         return {"status": "erro", "mensagem": f"Erro ao excluir cliente: {e}"}
+        
+# !!! ADICIONE AQUI AS SUAS FUTURAS FUNÇÕES DE LANÇAMENTO, ESTOQUE, OS, etc. !!!
 
 
 # ======================================================================
 # PASSO 3: O "ROTEADOR" (MAPA DE FERRAMENTAS)
 # ======================================================================
 TOOL_ROUTER: Dict[str, Callable[..., Dict[str, Any]]] = {
-    # Cliente
     "criar_cliente": call_api_criar_cliente,
     "consultar_cliente_por_id": call_api_consultar_cliente_por_id,
-    "consultar_cliente_por_telefone": call_api_consultar_cliente_por_telefone, # NOVO!
+    "consultar_cliente_por_telefone": call_api_consultar_cliente_por_telefone,
     "atualizar_cliente": call_api_atualizar_cliente,
     "excluir_cliente": call_api_excluir_cliente,
-    # Lançamento Financeiro (Adicionar aqui)
-    # Estoque (Adicionar aqui)
 }
 
-# ====== RESTO DO CÓDIGO (APENAS UM AJUSTE NO PROMPT) ======
+# ====== Inicialização do Gemini (Usa o TOOLS_MENU) ======
+gemini_model = None
+if GEMINI_API_KEY:
+    try:
+        from google import generativeai as genai
+        genai.configure(api_key=GEMINI_API_KEY)
+        safety_settings = {h: HarmBlockThreshold.BLOCK_NONE for h in HarmCategory}
+        
+        gemini_model = genai.GenerativeModel(
+            GEMINI_MODEL_NAME,
+            safety_settings=safety_settings,
+            tools=TOOLS_MENU
+        )
+        app.logger.info(f"[GEMINI] Modelo carregado com {len(TOOLS_MENU)} ferramentas.")
+    except Exception as e:
+        app.logger.exception(f"[GEMINI] Erro ao inicializar SDK: {e}")
+else:
+    app.logger.warning("[GEMINI] GEMINI_API_KEY não configurada.")
 
-# ... (código do Gemini e inicialização)
 
-# MODIFICAÇÃO NO WEBHOOK: Pegar o telefone do JID para a busca automática
+# ======================================================================
+# LÓGICA DE RESPOSTA DO BOT
+# ======================================================================
+def answer_with_gemini(user_text: str, chat_history: List[str], initial_context: str = "") -> str:
+    """Processa a resposta do Gemini, usando o ROTEADOR para chamar qualquer ferramenta."""
+    if not gemini_model:
+        return f"Olá! Recebi sua mensagem: {user_text}"
+
+    try:
+        system_prompt = (
+            "Você é um assistente da Vinnax Beauty. Seu objetivo é ser simpático, "
+            "profissional e ajudar o cliente. Se for o início da conversa, "
+            "cumprimente, se apresente e comece a conversa. Se o cliente já foi identificado no "
+            "CONTEXTO INICIAL, use o nome dele. Responda em português, de forma breve. "
+            "**FERRAMENTAS:** Use as ferramentas disponíveis (`tools`) sempre que o cliente solicitar uma ação (criar, consultar, excluir). "
+            "Sempre confirme os dados críticos antes de executar uma ação."
+        )
+        
+        history_string = "\n".join(chat_history)
+        full_prompt = (
+            f"{system_prompt}\n\n"
+            f"{initial_context}\n"
+            f"=== Histórico da Conversa ===\n{history_string}\n"
+            f"=== Nova Mensagem ===\nCliente: {user_text}\nAtendente:"
+        )
+
+        # 1. Primeira chamada ao Gemini
+        response = gemini_model.generate_content(full_prompt)
+        candidate = response.candidates[0]
+        
+        # 2. Verificar se o Gemini pediu para usar uma ferramenta
+        if candidate.finish_reason == "TOOL_USE":
+            app.logger.info("[GEMINI] Pedido de 'Tool Use' detectado.")
+            
+            function_call: FunctionCall = candidate.content.parts[0].function_call
+            tool_name = function_call.name
+            tool_args = function_call.args
+            
+            # 3. Usar o ROTEADOR para encontrar a função Python correta
+            if tool_name in TOOL_ROUTER:
+                app.logger.info(f"[ROUTER] Roteando para a função: '{tool_name}'")
+                
+                function_to_call = TOOL_ROUTER[tool_name]
+                api_result = function_to_call(**dict(tool_args))
+                
+                # 4. Segunda chamada ao Gemini (com o resultado da API)
+                tool_response_part = {
+                    "function_response": {
+                        "name": tool_name,
+                        "response": {"content": json.dumps(api_result)}
+                    }
+                }
+
+                response_final = gemini_model.generate_content(
+                    [full_prompt, candidate.content, tool_response_part]
+                )
+                txt = response_final.candidates[0].content.parts[0].text
+            
+            else:
+                app.logger.warning(f"[ROUTER] Ferramenta '{tool_name}' não encontrada no roteador.")
+                txt = "Desculpe, tentei usar uma ferramenta que não conheço."
+        
+        else:
+            txt = candidate.content.parts[0].text
+
+        if not txt:
+            return "Poderia repetir, por favor?"
+        return txt.strip()
+        
+    except Exception as e:
+        app.logger.exception(f"[GEMINI] Erro geral ao gerar resposta: {e}")
+        return "Desculpe, tive um problema para processar sua solicitação."
+
+# ====== Utilidades (Sem Alteração) ======
+def extract_text(message: Dict[str, Any]) -> str:
+    if not isinstance(message, dict): return ""
+    if "conversation" in message: return (message.get("conversation") or "").strip()
+    if "extendedTextMessage" in message: return (message["extendedTextMessage"].get("text") or "").strip()
+    for mid in ("imageMessage", "videoMessage", "documentMessage", "audioMessage"):
+        if mid in message: return (message[mid].get("caption") or "").strip()
+    return ""
+
+# ====== Rota Home (Sem Alteração) ======
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({"status": "ok", "service": "vinnax-bot"}), 200
+
+# ====== Rota Webhook (LÓGICA PRINCIPAL) ======
 @app.route("/webhook/messages-upsert", methods=["POST"])
 def webhook_messages_upsert():
-    # ... (código de extração de JID, número, etc.) ...
-    
-    # ... (código de extração de JID, número, etc.)
     raw = request.get_json(silent=True) or {}
     envelope = raw.get("data", raw)
     if isinstance(envelope, list) and envelope: envelope = envelope[0]
@@ -238,49 +339,40 @@ def webhook_messages_upsert():
         if msg_id in PROCESSED_IDS: return jsonify({"status": "duplicate_ignored"}), 200
         PROCESSED_IDS.append(msg_id)
     
-    # === AQUI PEGAMOS O TELEFONE DO REMETENTE ===
+    # 1. Extração do Telefone (JID)
     jid = (key.get("remoteJid") or envelope.get("participant") or "").strip()
     if not jid.endswith("@s.whatsapp.net"): return jsonify({"status": "non_user_ignored"}), 200
-    # O telefone do cliente (com código do país)
     client_phone = jid.replace("@s.whatsapp.net", "") 
-    # ============================================
     
-    number = client_phone # Usamos o client_phone como chave de sessão
+    number = client_phone 
     text = extract_text(message).strip()
     if not text: return jsonify({"status": "no_text_ignored"}), 200
     if number not in CHAT_SESSIONS: CHAT_SESSIONS[number] = []
     current_history = CHAT_SESSIONS[number]
     
-    # === ADIÇÃO: BUSCA AUTOMÁTICA E INJEÇÃO DE INFORMAÇÃO NO PROMPT ===
-    # O bot tenta encontrar o cliente APENAS se for o início da conversa
-    # Ele não precisa usar a ferramenta, nós vamos injetar a informação
-    
+    # 2. Busca Automática de Cliente (Contexto Inicial)
     initial_context = ""
-    # Se o cliente não tem histórico de chat (é a primeira mensagem)
     if not current_history: 
-        app.logger.info(f"Nova sessão. Buscando cliente por telefone: {client_phone}")
-        # Chamamos a função de busca
         search_result = call_api_consultar_cliente_por_telefone(client_phone)
         
         if search_result.get("status") == "nao_encontrado":
-            initial_context = f"AVISO: O sistema não encontrou nenhum cliente associado ao telefone {client_phone}."
+            initial_context = f"AVISO: O sistema não encontrou nenhum cliente associado ao telefone {client_phone}. Peça o nome para cadastrar."
         elif search_result.get("status") == "erro":
              initial_context = f"AVISO: O sistema não pôde buscar clientes devido a um erro na API."
         else:
-            # Se o cliente foi encontrado, pegamos o nome para o bot
             client_name = search_result.get("name") or "Cliente" 
-            initial_context = f"CONTEXTO INICIAL: O número de telefone {client_phone} pertence ao cliente '{client_name}'. O bot DEVE usar o nome do cliente na resposta e NÃO DEVE perguntar o telefone novamente."
+            initial_context = f"CONTEXTO INICIAL: O número de telefone {client_phone} pertence ao cliente '{client_name}' (ID {search_result.get('id')}). O bot DEVE usar o nome do cliente na resposta e NÃO DEVE perguntar o telefone novamente."
     
-    # A resposta do Gemini AGORA passa o contexto inicial
+    # 3. Geração da Resposta
     reply = answer_with_gemini(text, current_history, initial_context)
     
-    # ... (O restante da lógica de salvar o histórico e enviar a mensagem permanece a mesma)
-    
+    # 4. Salvamento da Memória
     CHAT_SESSIONS[number].append(f"Cliente: {text}")
-    CHAT_sessions[number].append(f"Atendente: {reply}")
+    CHAT_SESSIONS[number].append(f"Atendente: {reply}")
     while len(CHAT_SESSIONS[number]) > CHAT_HISTORY_LENGTH:
         CHAT_SESSIONS[number].pop(0)
 
+    # 5. Envio via Evolution API
     if not (EVOLUTION_KEY and EVOLUTION_URL_BASE and EVOLUTION_INSTANCE):
         app.logger.warning("[EVOLUTION] Variáveis de ambiente ausentes.")
         return jsonify({"status": "missing_env"}), 200
@@ -294,45 +386,3 @@ def webhook_messages_upsert():
     except Exception as e:
         app.logger.exception(f"[EVOLUTION] Erro ao enviar: {e}")
     return jsonify({"status": "ok"}), 200
-
-# MODIFICAÇÃO FINAL: A função answer_with_gemini precisa aceitar o novo contexto
-
-def answer_with_gemini(user_text: str, chat_history: List[str], initial_context: str = "") -> str:
-    # ... (Código da função, apenas o full_prompt muda)
-    if not gemini_model: return f"Olá! Recebi sua mensagem: {user_text}"
-    try:
-        system_prompt = ("Você é um assistente da Vinnax Beauty. ... (O resto do prompt)")
-        history_string = "\n".join(chat_history)
-        
-        # INCLUI O CONTEXTO INICIAL AQUI
-        full_prompt = (
-            f"{system_prompt}\n\n"
-            f"{initial_context}\n" # <-- NOVO
-            f"=== Histórico da Conversa ===\n{history_string}\n"
-            f"=== Nova Mensagem ===\nCliente: {user_text}\nAtendente:"
-        )
-        # ... (Restante da lógica)
-        
-        # O restante do código da função é o mesmo, mas precisa ser copiado da versão anterior
-        # para garantir que você tenha a versão completa no seu arquivo.
-        
-        response = gemini_model.generate_content(full_prompt)
-        candidate = response.candidates[0]
-        # ... (O resto da lógica de function calling/roteamento é o mesmo)
-        if candidate.finish_reason == "TOOL_USE":
-            function_call: FunctionCall = candidate.content.parts[0].function_call
-            tool_name = function_call.name
-            tool_args = function_call.args
-            if tool_name in TOOL_ROUTER:
-                function_to_call = TOOL_ROUTER[tool_name]
-                api_result = function_to_call(**dict(tool_args))
-                tool_response_part = {"function_response": {"name": tool_name, "response": {"content": json.dumps(api_result)}}}
-                response_final = gemini_model.generate_content([full_prompt, candidate.content, tool_response_part])
-                txt = response_final.candidates[0].content.parts[0].text
-            else: txt = "Desculpe, tentei usar uma ferramenta que não conheço."
-        else: txt = candidate.content.parts[0].text
-        if not txt: return "Poderia repetir, por favor?"
-        return txt.strip()
-    except Exception as e:
-        app.logger.exception(f"[GEMINI] Erro geral ao gerar resposta: {e}")
-        return "Desculpe, tive um problema para processar sua solicitação."
