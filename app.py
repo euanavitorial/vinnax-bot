@@ -6,9 +6,9 @@ from typing import Any, Dict, List, Callable
 from flask import Flask, request, jsonify
 import requests
 
-# --- CORREÇÃO DE IMPORTAÇÃO CRÍTICA (Estável) ---
-from google.generativeai.types import HarmCategory, HarmBlockThreshold 
+# --- CORREÇÃO DE IMPORTAÇÃO FINAL (Estável) ---
 from google.generativeai import types # Importamos como 'types' para estabilidade
+# Removida importação do HarmCategory e HarmBlockThreshold para resolver o erro 400
 # --- FIM DA CORREÇÃO ---
 
 
@@ -32,7 +32,7 @@ CHAT_SESSIONS: Dict[str, List[str]] = {}
 CHAT_HISTORY_LENGTH = 10
 
 
-# ====== Utilidades WhatsApp (MOVIDO PARA CIMA PARA EVITAR NAMERROR) ======
+# ====== Utilidades WhatsApp (NO LUGAR CERTO) ======
 def extract_text(message: Dict[str, Any]) -> str:
     """Extrai o texto de diversos tipos de mensagem do WhatsApp."""
     if not isinstance(message, dict): return ""
@@ -120,7 +120,7 @@ def get_auth_headers():
         "Content-Type": "application/json"
     }
 
-# --- FUNÇÕES DE CLIENTE ---
+# --- FUNÇÕES DE CLIENTE (Mantidas as 5) ---
 def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
@@ -175,8 +175,6 @@ def call_api_excluir_cliente(id_cliente: int) -> Dict[str, Any]:
         return response.json()
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao excluir cliente: {e}"}
         
-# !!! ADICIONE AQUI AS SUAS FUTURAS FUNÇÕES DE LANÇAMENTO, ESTOQUE, OS, etc. !!!
-
 
 # ======================================================================
 # PASSO 3: O "ROTEADOR" (MAPA DE FERRAMENTAS)
@@ -189,17 +187,16 @@ TOOL_ROUTER: Dict[str, Callable[..., Dict[str, Any]]] = {
     "excluir_cliente": call_api_excluir_cliente,
 }
 
-# ====== Inicialização do Gemini (Usa o TOOLS_MENU) ======
+# ====== Inicialização do Gemini (AGORA ESTÁVEL) ======
 gemini_model = None
 if GEMINI_API_KEY:
     try:
         from google import generativeai as genai
         genai.configure(api_key=GEMINI_API_KEY)
-        safety_settings = {h: HarmBlockThreshold.BLOCK_NONE for h in HarmCategory}
         
+        # REMOVIDO SAFETY SETTINGS PARA RESOLVER ERRO 400
         gemini_model = genai.GenerativeModel(
             GEMINI_MODEL_NAME,
-            safety_settings=safety_settings,
             tools=TOOLS_MENU
         )
         app.logger.info(f"[GEMINI] Modelo carregado com {len(TOOLS_MENU)} ferramentas.")
@@ -240,9 +237,7 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
         if candidate.finish_reason == "TOOL_USE":
             app.logger.info("[GEMINI] Pedido de 'Tool Use' detectado.")
             
-            # --- CORREÇÃO DE IMPORTAÇÃO UTILIZADA AQUI ---
             function_call: types.FunctionCall = candidate.content.parts[0].function_call
-            # --- FIM DA CORREÇÃO ---
             
             tool_name = function_call.name
             tool_args = function_call.args
@@ -301,17 +296,17 @@ def webhook_messages_upsert():
     if not message: return jsonify({"status": "no_message_ignored"}), 200
     msg_id = key.get("id") or envelope.get("idMessage") or ""
     if msg_id:
-        if msg_id in PROCESSED_IDS: return jsonify({"status": "duplicate_ignored"}), 200
+        if msg_id in PROCESSED_IDS: return jsonify({"status": "duplicate_ignored"}), 0
         PROCESSED_IDS.append(msg_id)
     
     # 1. Extração do Telefone (JID)
     jid = (key.get("remoteJid") or envelope.get("participant") or "").strip()
-    if not jid.endswith("@s.whatsapp.net"): return jsonify({"status": "non_user_ignored"}), 200
+    if not jid.endswith("@s.whatsapp.net"): return jsonify({"status": "non_user_ignored"}), 0
     client_phone = jid.replace("@s.whatsapp.net", "") 
     
     number = client_phone 
     text = extract_text(message).strip()
-    if not text: return jsonify({"status": "no_text_ignored"}), 200
+    if not text: return jsonify({"status": "no_text_ignored"}), 0
     if number not in CHAT_SESSIONS: CHAT_SESSIONS[number] = []
     current_history = CHAT_SESSIONS[number]
     
@@ -340,7 +335,7 @@ def webhook_messages_upsert():
     # 5. Envio via Evolution API
     if not (EVOLUTION_KEY and EVOLUTION_URL_BASE and EVOLUTION_INSTANCE):
         app.logger.warning("[EVOLUTION] Variáveis de ambiente ausentes.")
-        return jsonify({"status": "missing_env"}), 200
+        return jsonify({"status": "missing_env"}), 0
     
     try:
         url_send = f"{EVOLUTION_URL_BASE}/message/sendtext/{EVOLUTION_INSTANCE}"
@@ -350,4 +345,4 @@ def webhook_messages_upsert():
         app.logger.info(f"[EVOLUTION] {res.status_code} -> {res.text}")
     except Exception as e:
         app.logger.exception(f"[EVOLUTION] Erro ao enviar: {e}")
-    return jsonify({"status": "ok"}), 200
+    return jsonify({"status": "ok"}), 0
