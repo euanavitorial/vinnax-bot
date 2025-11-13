@@ -14,7 +14,6 @@ EVOLUTION_URL_BASE = os.environ.get("EVOLUTION_URL_BASE", "")
 EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "models/gemini-1.5-flash-latest")
 # você pode trocar o modelo apenas ajustando a env var no Render
 GEMINI_MODEL        = os.environ.get("GEMINI_MODEL", "models/gemini-2.5-flash")
 
