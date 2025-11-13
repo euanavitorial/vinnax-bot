@@ -53,7 +53,7 @@ def get_auth_headers():
 
 
 # ======================================================================
-# PASSO 2: AS FUNÇÕES REAIS DA API (TODAS JUNTAS E ACIMA DO ROUTER)
+# PASSO 2: AS FUNÇÕES REAIS DA API (CORREÇÃO DE SINTAXE APLICADA AQUI)
 # ======================================================================
 
 # --- FUNÇÕES DE CLIENTE (5) ---
@@ -61,7 +61,8 @@ def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None) -
     if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
         payload = {"name": nome, "phone": telefone, "email": email}
-        payload = {k: v for k, v in payload.items() if v is not None} response = requests.post(CLIENTE_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=20)
+        payload = {k: v for k, v in payload.items() if v is not None} 
+        response = requests.post(CLIENTE_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=20) # Corrigido: Linha separada
         response.raise_for_status()
         return response.json()
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao criar cliente: {e}"}
@@ -89,7 +90,7 @@ def call_api_atualizar_cliente(id_cliente: int, nome: str = None, telefone: str 
         url = f"{CLIENTE_API_ENDPOINT}/{id_cliente}"
         payload = {"name": nome, "phone": telefone, "email": email}
         payload = {k: v for k, v in payload.items() if v is not None}
-        response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20)
+        response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20) # Corrigido: Linha separada
         response.raise_for_status()
         return response.json()
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao atualizar cliente: {e}"}
@@ -133,7 +134,7 @@ def call_api_atualizar_produto(id_produto: int, nome: str = None, tipo: str = No
         url = f"{PRODUTO_API_ENDPOINT}/{id_produto}"
         payload = {"name": nome, "type": tipo, "price": preco}
         payload = {k: v for k, v in payload.items() if v is not None}
-        response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20)
+        response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20) # Corrigido: Linha separada
         response.raise_for_status()
         return response.json()
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao atualizar produto: {e}"}
@@ -153,7 +154,7 @@ def call_api_criar_os(client_id: str, product_id: str, description: str, total_p
     try:
         payload = {"client_id": client_id, "product_id": product_id, "description": description, "total_price": total_price, "deadline": deadline}
         payload = {k: v for k, v in payload.items() if v is not None}
-        response = requests.post(OS_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=20)
+        response = requests.post(OS_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=20) # Corrigido: Linha separada
         response.raise_for_status()
         return response.json()
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao criar OS: {e}"}
@@ -178,7 +179,7 @@ def call_api_atualizar_os(id_os: str, status: str = None, total_price: float = N
         url = f"{OS_API_ENDPOINT}/{id_os}"
         payload = {"status": status, "total_price": total_price}
         payload = {k: v for k, v in payload.items() if v is not None}
-        response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20)
+        response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20) # Corrigido: Linha separada
         response.raise_for_status()
         return response.json()
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao atualizar OS: {e}"}
@@ -225,7 +226,7 @@ def call_api_atualizar_orcamento(id_orcamento: str, quoted_price: float = None, 
         url = f"{ORCAMENTO_API_ENDPOINT}/{id_orcamento}"
         payload = {"quoted_price": quoted_price, "status": status}
         payload = {k: v for k, v in payload.items() if v is not None}
-        response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20)
+        response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20) # Corrigido: Linha separada
         response.raise_for_status()
         return response.json()
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao atualizar orçamento: {e}"}
@@ -273,7 +274,7 @@ TOOLS_MENU = [
 
 
 # ======================================================================
-# PASSO 3: O "ROTEADOR" (AGORA ESTÁ ACIMA DE TODAS AS ROTAS)
+# PASSO 3: O "ROTEADOR" (MANTIDO)
 # ======================================================================
 TOOL_ROUTER: Dict[str, Callable[..., Dict[str, Any]]] = {
     # Cliente
@@ -313,7 +314,7 @@ else:
 
 
 # ======================================================================
-# LÓGICA DE RESPOSTA DO BOT (COM PROMPT FOCADO NO CLIENTE)
+# LÓGICA DE RESPOSTA DO BOT (MANTIDA)
 # ======================================================================
 def answer_with_gemini(user_text: str, chat_history: List[str], initial_context: str = "") -> str:
     if not gemini_model: return f"Olá! Recebi sua mensagem: {user_text}"
