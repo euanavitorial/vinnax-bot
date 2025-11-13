@@ -2,32 +2,48 @@ import os
 import json
 from collections import deque
 from typing import Any, Dict, List, Callable
-import threading # Novo: Para processamento assíncrono
+import threading 
 
 from flask import Flask, request, jsonify
 import requests
 
-# --- CORREÇÃO DE IMPORTAÇÃO CRÍTICA (Downgrade para versão 0.3.0) ---
+# --- CORREÇÃO DE IMPORTAÇÃO CRÍTICA E INICIALIZAÇÃO CORRETA PARA v0.3.0 ---
 try:
-    # A partir da v0.3.0, a sintaxe de importação é mais estável.
     from google import genai
     from google.genai import types
+    from google.genai.errors import GoogleGenAIError
+    
+    # Inicialização do cliente na v0.3.0
+    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", ""))
+    
+    # Variável do modelo definida para uso posterior
+    GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "models/gemini-pro")
+    
+    # Criamos o modelo de forma manual usando o client (sintaxe da v0.3.0)
+    # A variável 'gemini_model' é o objeto que representa o uso das tools
+    gemini_model = client.models(GEMINI_MODEL_NAME) 
+
+    # Se a inicialização falhar, o gemini_model é None
+    
 except ImportError:
-    genai = None
+    client = None
+    gemini_model = None
     types = None
-# --- FIM DA CORREÇÃO ---
+    GoogleGenAIError = Exception
+except AttributeError:
+    # Erro de atributo (GenerativeModel, Models, etc.)
+    client = None
+    gemini_model = None
+    types = None
+    GoogleGenAIError = Exception
+# --- FIM DA CORREÇÃO DE INICIALIZAÇÃO ---
 
 
-# ====== Config (via variáveis de ambiente) ======
+# ====== Config (Restante) ======
 EVOLUTION_KEY = os.environ.get("EVOLUTION_KEY", "")
 EVOLUTION_URL_BASE = os.environ.get("EVOLUTION_URL_BASE", "")
 EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-# Usando gemini-pro pois é mais robusto na versão antiga 
-GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "models/gemini-pro") 
-
-# --- SUAS APIS (ENDPOINTS) ---
 LOVABLE_API_KEY = os.environ.get("LOVABLE_API_KEY", "") 
 CLIENTE_API_ENDPOINT = os.environ.get("CLIENTE_API_ENDPOINT", "https://ebiitbpdvskreiuoeyaz.supabase.co/functions/v1/api-clients")
 PRODUTO_API_ENDPOINT = os.environ.get("PRODUTO_API_ENDPOINT", "https://ebiitbpdvskreiuoeyaz.supabase.co/functions/v1/api-products")
@@ -42,9 +58,9 @@ CHAT_SESSIONS: Dict[str, List[str]] = {}
 CHAT_HISTORY_LENGTH = 10
 
 
-# ====== Utilidades (No Topo) ======
+# ====== Utilidades ======
 def extract_text(message: Dict[str, Any]) -> str:
-    """Extrai o texto de diversos tipos de mensagem do WhatsApp."""
+    # ... (Mantido)
     if not isinstance(message, dict): return ""
     if "conversation" in message: return (message.get("conversation") or "").strip()
     if "extendedTextMessage" in message: return (message["extendedTextMessage"].get("text") or "").strip()
@@ -53,7 +69,7 @@ def extract_text(message: Dict[str, Any]) -> str:
     return ""
 
 def get_auth_headers():
-    """Retorna o cabeçalho de autenticação para as APIs do Lovable."""
+    # ... (Mantido)
     return {
         "x-api-key": LOVABLE_API_KEY,
         "Content-Type": "application/json"
@@ -61,8 +77,7 @@ def get_auth_headers():
 
 
 # ======================================================================
-# PASSO 2: AS FUNÇÕES REAIS DA API (CORRIGIDAS E REORGANIZADAS)
-# (TODAS AS 20 FUNÇÕES DE API FICAM AQUI)
+# PASSO 2: AS FUNÇÕES REAIS DA API (TODAS AS 20 FUNÇÕES VÃO AQUI)
 # ======================================================================
 
 # --- FUNÇÕES DE CLIENTE (5) ---
@@ -258,7 +273,7 @@ TOOLS_MENU = [
     # --- CLIENTE (5) ---
     {"name": "criar_cliente", "description": "Cadastra um novo cliente no sistema. Requer nome e pelo menos telefone ou email.", "parameters": {"type_": "OBJECT", "properties": {"nome": {"type": "STRING"}, "telefone": {"type": "STRING"}, "email": {"type": "STRING"}}, "required": ["nome"]}},
     {"name": "consultar_cliente_por_id", "description": "Busca os detalhes de um cliente (telefone, email, etc.) usando o ID do cliente.", "parameters": {"type_": "OBJECT", "properties": {"id_cliente": {"type": "INTEGER"}}, "required": ["id_cliente"]}},
-    {"name": "consultar_cliente_por_telefone", "description": "Busca os detalhes de um cliente usando o número de telefone. Use para verificar se um novo cliente já está cadastrado.", "parameters": {"type_": "OBJECT", "properties": {"telefone": {"type": "STRING"}}, "required": ["telefone"]}},
+    {"name": "consultar_cliente_por_telefone", "description": "Busca os detalhes de um cliente usando o número de telefone. Use para verificar se um novo cliente já está cadastrado.", "parameters": {"type": "OBJECT", "properties": {"telefone": {"type": "STRING"}}, "required": ["telefone"]}},
     {"name": "atualizar_cliente", "description": "Modifica informações de um cliente existente usando o ID do cliente.", "parameters": {"type_": "OBJECT", "properties": {"id_cliente": {"type": "INTEGER"}, "nome": {"type": "STRING"}, "telefone": {"type": "STRING"}, "email": {"type": "STRING"}}, "required": ["id_cliente"]}},
     {"name": "excluir_cliente", "description": "Deleta permanentemente um cliente do sistema usando o ID do cliente.", "parameters": {"type_": "OBJECT", "properties": {"id_cliente": {"type": "INTEGER"}}, "required": ["id_cliente"]}},
     # --- PRODUTOS (5) ---
@@ -269,7 +284,7 @@ TOOLS_MENU = [
     {"name": "excluir_produto", "description": "Deleta permanentemente um produto do estoque usando o ID do produto.", "parameters": {"type_": "OBJECT", "properties": {"id_produto": {"type": "INTEGER"}}, "required": ["id_produto"]}},
     # --- ORDEM DE SERVIÇO (OS) (5) ---
     {"name": "criar_ordem_servico", "description": "Cria uma nova Ordem de Serviço (OS) no sistema. Necessita do ID do cliente e ID do produto.", "parameters": {"type_": "OBJECT", "properties": {"client_id": {"type": "STRING"}, "product_id": {"type": "STRING"}, "description": {"type": "STRING"}, "total_price": {"type": "NUMBER"}, "deadline": {"type": "STRING", "description": "Formato YYYY-MM-DD"}}, "required": ["client_id", "product_id", "description", "total_price"]}},
-    {"name": "consultar_ordem_servico_por_id", "description": "Busca os detalhes de uma Ordem de Serviço (OS) usando o ID da OS.", "parameters": {"type": "OBJECT", "properties": {"id_os": {"type": "STRING"}}, "required": ["id_os"]}},
+    {"name": "consultar_ordem_servico_por_id", "description": "Busca os detalhes de uma Ordem de Serviço (OS) usando o ID da OS.", "parameters": {"type_": "OBJECT", "properties": {"id_os": {"type": "STRING"}}, "required": ["id_os"]}},
     {"name": "consultar_ordens_servico_todas", "description": "Lista todas as Ordens de Serviço (OS) cadastradas no sistema.", "parameters": {"type_": "OBJECT", "properties": {}}},
     {"name": "atualizar_ordem_servico", "description": "Modifica informações de uma Ordem de Serviço (OS) existente (ex: status, preço) usando o ID da OS.", "parameters": {"type_": "OBJECT", "properties": {"id_os": {"type": "STRING"}, "status": {"type": "STRING"}, "total_price": {"type": "NUMBER"}}, "required": ["id_os"]}},
     {"name": "excluir_ordem_servico", "description": "Deleta permanentemente uma Ordem de Serviço (OS) do sistema usando o ID da OS.", "parameters": {"type_": "OBJECT", "properties": {"id_os": {"type": "STRING"}}, "required": ["id_os"]}},
@@ -305,27 +320,10 @@ TOOL_ROUTER: Dict[str, Callable[..., Dict[str, Any]]] = {
 }
 
 
-# ====== Inicialização do Gemini (AGORA USANDO O genai CORRIGIDO) ======
-gemini_model = None
-if GEMINI_API_KEY and genai:
-    try:
-        # types deve ser importado, e não FunctionCall diretamente
-        gemini_model = genai.GenerativeModel(
-            GEMINI_MODEL_NAME,
-            tools=TOOLS_MENU
-        )
-        app.logger.info(f"[GEMINI] Modelo carregado com {len(TOOLS_MENU)} ferramentas.")
-    except Exception as e:
-        app.logger.exception(f"[GEMINI] Erro ao inicializar SDK: {e}")
-else:
-    app.logger.warning("[GEMINI] GEMINI_API_KEY ou biblioteca não configurada.")
-
-
 # ======================================================================
 # LÓGICA DE RESPOSTA DO BOT (MANTIDA)
 # ======================================================================
 def answer_with_gemini(user_text: str, chat_history: List[str], initial_context: str = "") -> str:
-    # A verificação é mais robusta agora.
     if not gemini_model: 
         return "Olá! Que bom ter você aqui. Estou com uma pequena dificuldade técnica para acessar minhas ferramentas de inteligência, mas me diga: qual é o seu nome e como posso te ajudar hoje?"
     try:
@@ -349,22 +347,46 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
             f"=== Histórico da Conversa ===\n{history_string}\n"
             f"=== Nova Mensagem ===\nCliente: {user_text}\nAtendente:"
         )
-
-        response = gemini_model.generate_content(full_prompt)
+        
+        # Sintaxe da v0.3.0
+        response = gemini_model.generate_content(
+            model=GEMINI_MODEL_NAME,
+            prompt=full_prompt,
+            tools=TOOLS_MENU
+        )
+        
         candidate = response.candidates[0]
         
         if candidate.finish_reason == "TOOL_USE":
             app.logger.info("[GEMINI] Pedido de 'Tool Use' detectado.")
-            function_call: types.FunctionCall = candidate.content.parts[0].function_call
-            tool_name = function_call.name
-            tool_args = function_call.args
-            
+            # Adaptação para a sintaxe antiga de tool_call
+            if hasattr(candidate.content.parts[0], 'tool_call') and candidate.content.parts[0].tool_call:
+                tool_call = candidate.content.parts[0].tool_call
+                tool_name = tool_call.function.name
+                tool_args = dict(tool_call.function.args)
+            else: # Fallback para sintaxe mais nova, caso a API misture
+                tool_name = candidate.content.parts[0].function_call.name
+                tool_args = dict(candidate.content.parts[0].function_call.args)
+
+
             if tool_name in TOOL_ROUTER:
                 app.logger.info(f"[ROUTER] Roteando para a função: '{tool_name}'")
                 function_to_call = TOOL_ROUTER[tool_name]
-                api_result = function_to_call(**dict(tool_args))
-                tool_response_part = {"function_response": {"name": tool_name, "response": {"content": json.dumps(api_result)}}}
-                response_final = gemini_model.generate_content([full_prompt, candidate.content, tool_response_part])
+                api_result = function_to_call(**tool_args)
+                
+                # Adaptação do JSON de resposta para a v0.3.0
+                tool_response_part = {
+                    "tool_response": {
+                        "name": tool_name,
+                        "content": json.dumps(api_result)
+                    }
+                }
+                
+                # Chamada final (prompt, tool_call, tool_response)
+                response_final = gemini_model.generate_content(
+                    model=GEMINI_MODEL_NAME,
+                    prompt=[full_prompt, candidate.content, tool_response_part]
+                )
                 txt = response_final.candidates[0].content.parts[0].text
             else:
                 app.logger.warning(f"[ROUTER] Ferramenta '{tool_name}' não encontrada no roteador.")
@@ -376,6 +398,9 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
         if not txt:
             return "Poderia repetir, por favor?"
         return txt.strip()
+    except GoogleGenAIError as e:
+        app.logger.exception(f"[GEMINI] Erro Google GenAI: {e}")
+        return "Desculpe, a inteligência do sistema falhou temporariamente. Por favor, tente novamente em um minuto."
     except Exception as e:
         app.logger.exception(f"[GEMINI] Erro geral ao gerar resposta: {e}")
         return "Desculpe, tive um problema para processar sua solicitação."
