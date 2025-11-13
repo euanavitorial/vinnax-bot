@@ -6,19 +6,10 @@ from typing import Any, Dict, List, Callable
 from flask import Flask, request, jsonify
 import requests
 
-# --- CORREÇÃO DE IMPORTAÇÃO CRÍTICA ---
-# Esta é uma importação de último recurso para garantir que o código funcione
-# com diferentes versões da biblioteca google-generativeai.
-try:
-    from google.genai.types import FunctionCall
-except ImportError:
-    try:
-        from google.generativeai.types.content_types import FunctionCall
-    except ImportError:
-        # Tenta a importação antiga que causou o erro (para compatibilidade)
-        from google.generativeai.types import FunctionCall 
-
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
+# --- CORREÇÃO DE IMPORTAÇÃO FINAL ---
+# Usamos o método mais estável de importar a biblioteca.
+from google.generativeai.types import HarmCategory, HarmBlockThreshold 
+from google.generativeai import types # Importamos como 'types'
 # --- FIM DA CORREÇÃO ---
 
 
@@ -120,78 +111,51 @@ def get_auth_headers():
     }
 
 # --- FUNÇÕES DE CLIENTE ---
-
 def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None) -> Dict[str, Any]:
-    """Ferramenta: Chama a API para criar um novo cliente (POST)."""
-    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT):
-        return {"status": "erro", "mensagem": "API de Cliente não configurada."}
-
+    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
         payload = {"name": nome, "phone": telefone, "email": email}
         payload = {k: v for k, v in payload.items() if v is not None} 
-        
         response = requests.post(CLIENTE_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e:
-        return {"status": "erro", "mensagem": f"Erro ao criar cliente: {e}"}
+    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao criar cliente: {e}"}
 
 def call_api_consultar_cliente_por_id(id_cliente: int) -> Dict[str, Any]:
-    """Ferramenta: Chama a API para buscar cliente por ID (GET)."""
-    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT):
-        return {"status": "erro", "mensagem": "API de Cliente não configurada."}
-
+    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
         url = f"{CLIENTE_API_ENDPOINT}/{id_cliente}"
         response = requests.get(url, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e:
-        return {"status": "erro", "mensagem": f"Erro ao consultar cliente: {e}"}
+    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao consultar cliente: {e}"}
 
 def call_api_consultar_cliente_por_telefone(telefone: str) -> Dict[str, Any]:
-    """Ferramenta: Chama a API para buscar cliente pelo número de telefone (GET)."""
-    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT):
-        return {"status": "erro", "mensagem": "API de Cliente não configurada."}
-
+    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
-        # Assume-se que a API retorna todos os clientes (sem filtro na URL)
         response = requests.get(CLIENTE_API_ENDPOINT, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
-        
         clientes = response.json() 
         cliente_encontrado = [c for c in clientes if c.get('phone') == telefone]
-        
         if cliente_encontrado:
-            # Retorna apenas o primeiro cliente encontrado
             return cliente_encontrado[0] 
         else:
             return {"status": "nao_encontrado", "mensagem": f"Nenhum cliente encontrado com o telefone {telefone}."}
-
-    except Exception as e:
-        return {"status": "erro", "mensagem": f"Erro ao consultar cliente por telefone: {e}"}
+    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao consultar cliente por telefone: {e}"}
 
 def call_api_atualizar_cliente(id_cliente: int, nome: str = None, telefone: str = None, email: str = None) -> Dict[str, Any]:
-    """Ferramenta: Chama a API para atualizar um cliente (PUT)."""
-    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT):
-        return {"status": "erro", "mensagem": "API de Cliente não configurada."}
-
+    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
         url = f"{CLIENTE_API_ENDPOINT}/{id_cliente}"
         payload = {"name": nome, "phone": telefone, "email": email}
         payload = {k: v for k, v in payload.items() if v is not None}
-        
         response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e:
-        return {"status": "erro", "mensagem": f"Erro ao atualizar cliente: {e}"}
+    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao atualizar cliente: {e}"}
 
 def call_api_excluir_cliente(id_cliente: int) -> Dict[str, Any]:
-    """Ferramenta: Chama a API para deletar um cliente (DELETE)."""
-    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT):
-        return {"status": "erro", "mensagem": "API de Cliente não configurada."}
-
+    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
         url = f"{CLIENTE_API_ENDPOINT}/{id_cliente}"
         response = requests.delete(url, headers=get_auth_headers(), timeout=20)
@@ -199,8 +163,7 @@ def call_api_excluir_cliente(id_cliente: int) -> Dict[str, Any]:
         if response.status_code == 204:
             return {"status": "sucesso", "mensagem": f"Cliente ID {id_cliente} excluído com sucesso."}
         return response.json()
-    except Exception as e:
-        return {"status": "erro", "mensagem": f"Erro ao excluir cliente: {e}"}
+    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao excluir cliente: {e}"}
         
 # !!! ADICIONE AQUI AS SUAS FUTURAS FUNÇÕES DE LANÇAMENTO, ESTOQUE, OS, etc. !!!
 
@@ -240,10 +203,7 @@ else:
 # LÓGICA DE RESPOSTA DO BOT
 # ======================================================================
 def answer_with_gemini(user_text: str, chat_history: List[str], initial_context: str = "") -> str:
-    """Processa a resposta do Gemini, usando o ROTEADOR para chamar qualquer ferramenta."""
-    if not gemini_model:
-        return f"Olá! Recebi sua mensagem: {user_text}"
-
+    if not gemini_model: return f"Olá! Recebi sua mensagem: {user_text}"
     try:
         system_prompt = (
             "Você é um assistente da Vinnax Beauty. Seu objetivo é ser simpático, "
@@ -270,11 +230,14 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
         if candidate.finish_reason == "TOOL_USE":
             app.logger.info("[GEMINI] Pedido de 'Tool Use' detectado.")
             
-            function_call: FunctionCall = candidate.content.parts[0].function_call
+            # --- CORREÇÃO DE IMPORTAÇÃO UTILIZADA AQUI ---
+            function_call: types.FunctionCall = candidate.content.parts[0].function_call
+            # --- FIM DA CORREÇÃO ---
+            
             tool_name = function_call.name
             tool_args = function_call.args
             
-            # 3. Usar o ROTEADOR para encontrar a função Python correta
+            # 3. Usar o ROTEADOR
             if tool_name in TOOL_ROUTER:
                 app.logger.info(f"[ROUTER] Roteando para a função: '{tool_name}'")
                 
@@ -309,23 +272,10 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
         app.logger.exception(f"[GEMINI] Erro geral ao gerar resposta: {e}")
         return "Desculpe, tive um problema para processar sua solicitação."
 
-# ====== Utilidades (Sem Alteração) ======
-def extract_text(message: Dict[str, Any]) -> str:
-    if not isinstance(message, dict): return ""
-    if "conversation" in message: return (message.get("conversation") or "").strip()
-    if "extendedTextMessage" in message: return (message["extendedTextMessage"].get("text") or "").strip()
-    for mid in ("imageMessage", "videoMessage", "documentMessage", "audioMessage"):
-        if mid in message: return (message[mid].get("caption") or "").strip()
-    return ""
-
-# ====== Rota Home (Sem Alteração) ======
-@app.route("/", methods=["GET"])
-def home():
-    return jsonify({"status": "ok", "service": "vinnax-bot"}), 200
-
 # ====== Rota Webhook (LÓGICA PRINCIPAL) ======
 @app.route("/webhook/messages-upsert", methods=["POST"])
 def webhook_messages_upsert():
+    # ... (Recebimento de dados) ...
     raw = request.get_json(silent=True) or {}
     envelope = raw.get("data", raw)
     if isinstance(envelope, list) and envelope: envelope = envelope[0]
