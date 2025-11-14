@@ -3,7 +3,7 @@ import json
 from collections import deque
 from typing import Any, Dict, List, Callable
 import threading 
-import re 
+import re # Importado para limpeza do telefone
 import sys # Importado para logs de depuração (stderr)
 
 from flask import Flask, request, jsonify
@@ -60,12 +60,19 @@ def get_auth_headers():
         "Content-Type": "application/json"
     }
 
+# --- FUNÇÃO DE NORMALIZAÇÃO MELHORADA (COM SUGESTÃO DO GPT) ---
 def normalize_phone(phone: str) -> str:
-    """Limpa o JID, removendo '55' do início e o '@s.whatsapp.net'."""
-    phone = phone.replace("@s.whatsapp.net", "")
-    # Remove apenas o 55 se for um número brasileiro completo
-    if phone.startswith("55") and len(phone) > 11:
+    """Normaliza número de telefone vindo do WhatsApp JID para formato nacional sem DDI e sem 0 extra."""
+    phone = phone.replace("@s.whatsapp.net", "").strip()
+    
+    # Remove código do país se for brasileiro
+    if phone.startswith("55"):
         phone = phone[2:]
+    
+    # Remove 0 após o DDD se presente (ex: 64099388707 -> 6499388707)
+    if len(phone) >= 11 and phone[2] == "0":
+        phone = phone[:2] + phone[3:]
+
     return phone
 
 
@@ -77,13 +84,17 @@ def normalize_phone(phone: str) -> str:
 def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
+        # Garantindo que o telefone a ser cadastrado está normalizado
         telefone_normalizado = normalize_phone(telefone) if telefone else None
+        
         payload = {"name": nome, "phone": telefone_normalizado, "email": email}
         payload = {k: v for k, v in payload.items() if v is not None} 
         response = requests.post(CLIENTE_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao criar cliente: {e}"}
+    except Exception as e: 
+        print(f"[API_CALL] Erro em call_api_criar_cliente: {e}", file=sys.stderr)
+        return {"status": "erro", "mensagem": f"Erro ao criar cliente: {e}"}
 
 def call_api_consultar_cliente_por_id(id_cliente: int) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
@@ -92,19 +103,36 @@ def call_api_consultar_cliente_por_id(id_cliente: int) -> Dict[str, Any]:
         response = requests.get(url, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao consultar cliente: {e}"}
+    except Exception as e: 
+        print(f"[API_CALL] Erro em call_api_consultar_cliente_por_id: {e}", file=sys.stderr)
+        return {"status": "erro", "mensagem": f"Erro ao consultar cliente: {e}"}
 
 def call_api_consultar_cliente_por_telefone(telefone: str) -> Dict[str, Any]:
-    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
+    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): 
+        print("[API_CALL] Chaves da API de Cliente não configuradas.", file=sys.stderr)
+        return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
         telefone_normalizado = normalize_phone(telefone)
+        print(f"[API_CALL] Buscando cliente por telefone: {telefone_normalizado}", file=sys.stderr)
+        
         response = requests.get(CLIENTE_API_ENDPOINT, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
+        
         clientes = response.json() 
+        if not isinstance(clientes, list):
+             print(f"[API_CALL] API de Clientes não retornou uma lista. Retornou: {clientes}", file=sys.stderr)
+             return {"status": "erro", "mensagem": "Resposta inesperada da API de Clientes."}
+
         cliente_encontrado = [c for c in clientes if c.get('phone') == telefone_normalizado]
-        if cliente_encontrado: return cliente_encontrado[0] 
-        else: return {"status": "nao_encontrado", "mensagem": f"Nenhum cliente encontrado com o telefone {telefone_normalizado}."}
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao consultar cliente por telefone: {e}"}
+        if cliente_encontrado: 
+            print("[API_CALL] Cliente encontrado.", file=sys.stderr)
+            return cliente_encontrado[0] 
+        else: 
+            print("[API_CALL] Cliente não encontrado.", file=sys.stderr)
+            return {"status": "nao_encontrado", "mensagem": f"Nenhum cliente encontrado com o telefone {telefone_normalizado}."}
+    except Exception as e: 
+        print(f"[API_CALL] Erro em call_api_consultar_cliente_por_telefone: {e}", file=sys.stderr)
+        return {"status": "erro", "mensagem": f"Erro ao consultar cliente por telefone: {e}"}
 
 def call_api_atualizar_cliente(id_cliente: int, nome: str = None, telefone: str = None, email: str = None) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
@@ -422,7 +450,7 @@ def home():
 def process_message(data):
     # A lógica de processamento do webhook (a parte que demora)
     try:
-        print("[PROCESSOR] Thread iniciada.", file=sys.stderr) # <-- LOG DE DEPURAÇÃO
+        print("\n--- [PROCESSOR] Thread iniciada. ---", file=sys.stderr) # <-- LOG DE DEPURAÇÃO
         envelope = data.get("data", data)
         if isinstance(envelope, list) and envelope: envelope = envelope[0]
         if not isinstance(envelope, dict): return 
@@ -441,15 +469,18 @@ def process_message(data):
         # --- CORREÇÃO DO TELEFONE (NORMALIZAÇÃO) ---
         jid = (key.get("remoteJid") or envelope.get("participant") or "").strip()
         if not jid.endswith("@s.whatsapp.net"): return 
-        client_phone_normalized = normalize_phone(jid) 
         
-        number = client_phone_normalized
+        client_phone_normalized = normalize_phone(jid) # Para o BD (ex: 64...)
+        number_to_reply = jid # Para a API do Evolution (ex: 5564...@s.whatsapp.net)
+        
         text = extract_text(message).strip()
         if not text: 
             print("[PROCESSOR] Texto vazio, encerrando thread.", file=sys.stderr)
             return 
-        if number not in CHAT_SESSIONS: CHAT_SESSIONS[number] = []
-        current_history = CHAT_SESSIONS[number]
+        
+        # Usamos o JID (number_to_reply) como chave de sessão
+        if number_to_reply not in CHAT_SESSIONS: CHAT_SESSIONS[number_to_reply] = []
+        current_history = CHAT_SESSIONS[number_to_reply]
         
         initial_context = ""
         # Chamada de API para contexto é mantida aqui
@@ -470,10 +501,10 @@ def process_message(data):
         reply = answer_with_gemini(text, current_history, initial_context, client_phone_normalized)
         print(f"[PROCESSOR] Resposta do Gemini recebida: {reply[:50]}...", file=sys.stderr) # <-- LOG DE DEPURAÇÃO
         
-        CHAT_SESSIONS[number].append(f"Cliente: {text}")
-        CHAT_SESSIONS[number].append(f"Atendente: {reply}")
-        while len(CHAT_SESSIONS[number]) > CHAT_HISTORY_LENGTH:
-            CHAT_SESSIONS[number].pop(0)
+        CHAT_SESSIONS[number_to_reply].append(f"Cliente: {text}")
+        CHAT_SESSIONS[number_to_reply].append(f"Atendente: {reply}")
+        while len(CHAT_SESSIONS[number_to_reply]) > CHAT_HISTORY_LENGTH:
+            CHAT_SESSIONS[number_to_reply].pop(0)
 
         if not (EVOLUTION_KEY and EVOLUTION_URL_BASE and EVOLUTION_INSTANCE):
             print("[EVOLUTION] Variáveis de ambiente ausentes. Encerrando thread.", file=sys.stderr)
@@ -482,7 +513,10 @@ def process_message(data):
         print("[PROCESSOR] Enviando resposta para Evolution API...", file=sys.stderr)
         url_send = f"{EVOLUTION_URL_BASE}/message/sendtext/{EVOLUTION_INSTANCE}"
         headers = {"apikey": EVOLUTION_KEY, "Content-Type": "application/json"}
-        payload = {"number": number, "text": reply}
+        
+        # CORREÇÃO FINAL: Usando a variável correta para responder (o JID completo)
+        payload = {"number": number_to_reply, "text": reply} 
+        
         res = requests.post(url_send, json=payload, headers=headers, timeout=20)
         print(f"[EVOLUTION] {res.status_code} -> {res.text}", file=sys.stderr)
     except Exception as e:
@@ -495,8 +529,7 @@ def webhook_messages_upsert():
     data = request.get_json(silent=True) or {}
     
     # --- NOVO LOG DE DEPURAÇÃO (Sugerido pelo GPT) ---
-    # Vamos logar o payload bruto que a Evolution API está enviando
-    print(f"[DEBUG] Webhook Payload Recebido: {json.dumps(data)}", file=sys.stderr)
+    print(f"\n[DEBUG] Webhook Payload Recebido: {json.dumps(data)}", file=sys.stderr)
     # --- FIM DO LOG ---
 
     # Inicia o processamento pesado em segundo plano
