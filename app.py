@@ -75,9 +75,7 @@ def normalize_phone(phone: str) -> str:
 def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
-        # Garantindo que o telefone a ser cadastrado está normalizado
         telefone_normalizado = normalize_phone(telefone) if telefone else None
-        
         payload = {"name": nome, "phone": telefone_normalizado, "email": email}
         payload = {k: v for k, v in payload.items() if v is not None} 
         response = requests.post(CLIENTE_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=20)
@@ -97,13 +95,10 @@ def call_api_consultar_cliente_por_id(id_cliente: int) -> Dict[str, Any]:
 def call_api_consultar_cliente_por_telefone(telefone: str) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
-        # Garantindo que a busca é feita pelo número normalizado
         telefone_normalizado = normalize_phone(telefone)
-
         response = requests.get(CLIENTE_API_ENDPOINT, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         clientes = response.json() 
-        # Busca no BD pelo número normalizado
         cliente_encontrado = [c for c in clientes if c.get('phone') == telefone_normalizado]
         if cliente_encontrado: return cliente_encontrado[0] 
         else: return {"status": "nao_encontrado", "mensagem": f"Nenhum cliente encontrado com o telefone {telefone_normalizado}."}
@@ -353,6 +348,7 @@ else:
 def answer_with_gemini(user_text: str, chat_history: List[str], initial_context: str = "", client_phone: str = None) -> str:
     # A verificação é mais robusta agora.
     if not gemini_model: 
+        app.logger.warning("[GEMINI] answer_with_gemini chamado, mas gemini_model é None. Usando fallback.")
         return "Olá! Que bom ter você aqui. Estou com uma pequena dificuldade técnica para acessar minhas ferramentas de inteligência, mas me diga: qual é o seu nome e como posso te ajudar hoje?"
     try:
         # --- PROMPT DO SISTEMA FINAL E SEGURO (Focado em Vendas e Atendimento) ---
@@ -422,6 +418,7 @@ def home():
 def process_message(data):
     # A lógica de processamento do webhook (a parte que demora)
     try:
+        app.logger.info("[PROCESSOR] Thread iniciada.") # <-- LOG DE DEPURAÇÃO
         envelope = data.get("data", data)
         if isinstance(envelope, list) and envelope: envelope = envelope[0]
         if not isinstance(envelope, dict): return 
@@ -440,21 +437,23 @@ def process_message(data):
         # --- CORREÇÃO DO TELEFONE (NORMALIZAÇÃO) ---
         jid = (key.get("remoteJid") or envelope.get("participant") or "").strip()
         if not jid.endswith("@s.whatsapp.net"): return 
-        # AQUI ESTÁ A MUDANÇA: Usamos a função de normalização
         client_phone_normalized = normalize_phone(jid) 
-        # --- FIM DA MUDANÇA ---
         
         number = client_phone_normalized
         text = extract_text(message).strip()
-        if not text: return 
+        if not text: 
+            app.logger.info("[PROCESSOR] Texto vazio, encerrando thread.")
+            return 
         if number not in CHAT_SESSIONS: CHAT_SESSIONS[number] = []
         current_history = CHAT_SESSIONS[number]
         
         initial_context = ""
         # Chamada de API para contexto é mantida aqui
         if not current_history: 
-            # Busca pelo telefone normalizado
+            app.logger.info(f"[PROCESSOR] Nova sessão, buscando cliente: {client_phone_normalized}")
             search_result = call_api_consultar_cliente_por_telefone(client_phone_normalized)
+            app.logger.info(f"[PROCESSOR] Resultado da busca: {search_result.get('status')}") # <-- LOG DE DEPURAÇÃO
+            
             if search_result.get("status") == "nao_encontrado":
                 initial_context = f"AVISO: O sistema não encontrou nenhum cliente associado ao telefone {client_phone_normalized}. Peça o primeiro nome para cadastrar."
             elif search_result.get("status") == "erro":
@@ -463,8 +462,9 @@ def process_message(data):
                 client_name = search_result.get("name") or "Cliente" 
                 initial_context = f"CONTEXTO INICIAL: O número de telefone {client_phone_normalized} pertence ao cliente '{client_name}' (ID {search_result.get('id')}). O bot DEVE usar o nome do cliente na resposta e NÃO DEVE perguntar o telefone novamente."
         
-        # Passando o telefone normalizado para o cérebro (para a injeção)
+        app.logger.info("[PROCESSOR] Chamando answer_with_gemini...")
         reply = answer_with_gemini(text, current_history, initial_context, client_phone_normalized)
+        app.logger.info(f"[PROCESSOR] Resposta do Gemini recebida: {reply[:50]}...") # <-- LOG DE DEPURAÇÃO
         
         CHAT_SESSIONS[number].append(f"Cliente: {text}")
         CHAT_SESSIONS[number].append(f"Atendente: {reply}")
@@ -472,16 +472,17 @@ def process_message(data):
             CHAT_SESSIONS[number].pop(0)
 
         if not (EVOLUTION_KEY and EVOLUTION_URL_BASE and EVOLUTION_INSTANCE):
-            app.logger.warning("[EVOLUTION] Variáveis de ambiente ausentes.")
+            app.logger.warning("[EVOLUTION] Variáveis de ambiente ausentes. Encerrando thread.")
             return 
         
+        app.logger.info("[PROCESSOR] Enviando resposta para Evolution API...")
         url_send = f"{EVOLUTION_URL_BASE}/message/sendtext/{EVOLUTION_INSTANCE}"
         headers = {"apikey": EVOLUTION_KEY, "Content-Type": "application/json"}
         payload = {"number": number, "text": reply}
         res = requests.post(url_send, json=payload, headers=headers, timeout=20)
         app.logger.info(f"[EVOLUTION] {res.status_code} -> {res.text}")
     except Exception as e:
-        app.logger.exception(f"[PROCESSOR] Erro no processamento assíncrono: {e}")
+        app.logger.exception(f"[PROCESSOR] ERRO FATAL no processamento assíncrono: {e}")
 
 
 @app.route("/webhook/messages-upsert", methods=["POST"])
