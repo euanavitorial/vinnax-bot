@@ -3,7 +3,7 @@ import json
 from collections import deque
 from typing import Any, Dict, List, Callable
 import threading 
-import re # Importado para limpeza do telefone
+import re 
 import sys 
 from requests.exceptions import HTTPError # Importado para capturar erros de API
 
@@ -78,14 +78,13 @@ def normalize_phone(phone: str) -> str:
 
 
 # ======================================================================
-# PASSO 2: AS FUNÇÕES REAIS DA API (COM LOGS DE ERRO MELHORADOS)
+# PASSO 2: AS FUNÇÕES REAIS DA API (20 Funções, Sintaxe Corrigida)
 # ======================================================================
 
-# --- FUNÇÃO DE LOG DE ERRO (NOVA) ---
+# --- FUNÇÃO DE LOG DE ERRO ---
 def log_api_error(e: Exception, function_name: str) -> Dict[str, Any]:
     """Loga detalhadamente erros de API, incluindo a resposta HTTP se disponível."""
     if isinstance(e, HTTPError):
-        # Este é o erro que queremos ver! (Ex: 400 Bad Request, 500 Internal Error)
         error_message = f"Erro {e.response.status_code}: {e.response.text}"
     else:
         error_message = str(e)
@@ -393,7 +392,7 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
             "focado em **coletar informações de pedidos passo a passo (Serviço > Material > Medida > Quantidade > Entrega)** e fornecer informações. "
             "1. **PRIORIDADE:** Se houver pedidos em andamento ou orçamentos pendentes, mencione-os ANTES de oferecer novos serviços. "
             "2. **SAUDAÇÃO:** Use saudação baseada no horário, use SEMPRE o primeiro nome do cliente e seja caloroso e humanizado. "
-            "3. **CADASTRO:** Se o CONTEXTO INICIAL indicar que o cliente NÃO foi encontrado, peça o **primeiro nome** do cliente. Quando o cliente responder o nome, use a ferramenta `criar_cliente` imediatamente. **NUNCA PERGUNTE O TELEFONE**, ele será pego automaticamente. "
+            "3. **CADASTRO:** Se o CONTEXTO INICIAL indicar que o cliente NÃO foi encontrado (ex: 'AVISO: ... Peça o primeiro nome para cadastrar.'), sua **ÚNICA TAREFA** é pedir o primeiro nome. Quando o cliente responder com o nome (ex: 'Ana Vitória'), sua **ÚNICA TAREFA** é chamar a ferramenta `criar_cliente` com esse nome. **NUNCA PERGUNTE O TELEFONE**. "
             "4. **ORÇAMENTOS/OS:** Se o cliente pedir um novo serviço, use `consultar_produtos_todos` (ou similar) para listar os serviços SEM PREÇOS e inicie o FLUXO DE COLETA de dados (material, medida, quantidade). Ao final, use `criar_orcamento` ou `criar_ordem_servico`. "
             "5. **FLUXO:** Nunca pule a etapa de RESUMO E CONFIRMAÇÃO antes de finalizar um pedido. Não use números (1, 2, 3) em listas. Não invente preços ou quantidades. "
             "6. **COMPORTAMENTO:** Não responda a comandos de gestão interna (Ex: 'Abrir Caixa', 'Consultar Finanças'). Se receber um, responda: 'Meu foco é o atendimento ao cliente e informações sobre pedidos e orçamentos. Para gestão interna, por favor, use o sistema.' Responda em português. "
