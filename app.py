@@ -3,7 +3,7 @@ import json
 from collections import deque
 from typing import Any, Dict, List, Callable
 import threading 
-import re # Importado para limpeza do telefone
+import re 
 import sys 
 from requests.exceptions import HTTPError # Importado para capturar erros de API
 
@@ -61,19 +61,14 @@ def get_auth_headers():
         "Content-Type": "application/json"
     }
 
-# --- FUNÇÃO DE NORMALIZAÇÃO OTIMIZADA (COM REGEX) ---
 def normalize_phone(phone: str) -> str:
     """Normaliza número de telefone vindo do WhatsApp JID para formato nacional sem DDI."""
     phone = re.sub(r'@s\.whatsapp\.net$', '', phone) # Remove o sufixo
-        
-    # Remove o DDI 55 se presente
     if phone.startswith("55"):
         phone = phone[2:]
-            
-    # Remove o zero após o DDD (ex: 64099388707 -> 6499388707)
-    # Padrão: (DD)0(9XXXX-XXXX)
-    phone = re.sub(r'^(\d{2})0(\d{9})$', r'\1\2', phone)
-        
+    # Remove 0 após o DDD se presente (ex: 64099388707 -> 6499388707)
+    if len(phone) >= 11 and phone[2] == "0":
+        phone = phone[:2] + phone[3:]
     return phone
 
 
@@ -326,7 +321,8 @@ TOOLS_MENU = [
     {"name": "consultar_orcamento_por_id", "description": "Busca os detalhes de um orçamento (preço cotado, status) usando o ID do orçamento.", "parameters": {"type_": "OBJECT", "properties": {"id_orcamento": {"type": "STRING", "description": "O ID (UUID) do Orçamento."}}, "required": ["id_orcamento"]}},
     {"name": "consultar_orcamentos_todos", "description": "Lista todos os orçamentos cadastrados no sistema.", "parameters": {"type_": "OBJECT", "properties": {}}},
     {"name": "atualizar_orcamento", "description": "Modifica o preço ou status de um orçamento existente. O preço cotado é o 'quoted_price'.", "parameters": {"type_": "OBJECT", "properties": {"id_orcamento": {"type": "STRING"}, "quoted_price": {"type": "NUMBER"}, "status": {"type": "STRING"}}, "required": ["id_orcamento"]}},
-    {"name":S": "excluir_orcamento", "description": "Deleta permanentemente um orçamento do sistema usando o ID.", "parameters": {"type_": "OBJECT", "properties": {"id_orcamento": {"type": "STRING", "description": "O ID (UUID) do orçamento a ser excluído."}}, "required": ["id_orcamento"]}}
+    # --- CORREÇÃO DO ERRO DE SINTAXE (TYPO) ---
+    {"name": "excluir_orcamento", "description": "Deleta permanentemente um orçamento do sistema usando o ID.", "parameters": {"type_": "OBJECT", "properties": {"id_orcamento": {"type": "STRING", "description": "O ID (UUID) do orçamento a ser excluído."}}, "required": ["id_orcamento"]}}
 ]
 
 
