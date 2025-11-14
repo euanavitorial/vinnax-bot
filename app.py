@@ -3,7 +3,8 @@ import json
 from collections import deque
 from typing import Any, Dict, List, Callable
 import threading 
-import re # Importado para limpeza do telefone
+import re 
+import sys # Importado para logs de depuração (stderr)
 
 from flask import Flask, request, jsonify
 import requests
@@ -13,6 +14,7 @@ try:
     from google import generativeai as genai
     from google.generativeai import types
 except ImportError:
+    print("[ERRO FATAL] Biblioteca google.generativeai não encontrada.", file=sys.stderr)
     genai = None
     types = None
 # --- FIM DA IMPORTAÇÃO ---
@@ -329,17 +331,19 @@ TOOL_ROUTER: Dict[str, Callable[..., Dict[str, Any]]] = {
 gemini_model = None
 if GEMINI_API_KEY and genai:
     try:
-        if types is None: raise ImportError("types is None") # Garante que a importação funcionou
+        if types is None: 
+            print("[ERRO FATAL] Módulo 'types' do Gemini não foi importado.", file=sys.stderr)
+            raise ImportError("types is None") # Garante que a importação funcionou
         genai.configure(api_key=GEMINI_API_KEY)
         gemini_model = genai.GenerativeModel(
             GEMINI_MODEL_NAME,
             tools=TOOLS_MENU
         )
-        app.logger.info(f"[GEMINI] Modelo carregado com {len(TOOLS_MENU)} ferramentas.")
+        print(f"[GEMINI] Modelo carregado com {len(TOOLS_MENU)} ferramentas.", file=sys.stderr)
     except Exception as e:
-        app.logger.exception(f"[GEMINI] Erro ao inicializar SDK: {e}")
+        print(f"[GEMINI] Erro ao inicializar SDK: {e}", file=sys.stderr)
 else:
-    app.logger.warning("[GEMINI] GEMINI_API_KEY ou biblioteca não configurada.")
+    print("[GEMINI] GEMINI_API_KEY ou biblioteca não configurada.", file=sys.stderr)
 
 
 # ======================================================================
@@ -348,7 +352,7 @@ else:
 def answer_with_gemini(user_text: str, chat_history: List[str], initial_context: str = "", client_phone: str = None) -> str:
     # A verificação é mais robusta agora.
     if not gemini_model: 
-        app.logger.warning("[GEMINI] answer_with_gemini chamado, mas gemini_model é None. Usando fallback.")
+        print("[GEMINI] answer_with_gemini chamado, mas gemini_model é None. Usando fallback.", file=sys.stderr)
         return "Olá! Que bom ter você aqui. Estou com uma pequena dificuldade técnica para acessar minhas ferramentas de inteligência, mas me diga: qual é o seu nome e como posso te ajudar hoje?"
     try:
         # --- PROMPT DO SISTEMA FINAL E SEGURO (Focado em Vendas e Atendimento) ---
@@ -376,7 +380,7 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
         candidate = response.candidates[0]
         
         if candidate.finish_reason == "TOOL_USE":
-            app.logger.info("[GEMINI] Pedido de 'Tool Use' detectado.")
+            print("[GEMINI] Pedido de 'Tool Use' detectado.", file=sys.stderr)
             function_call: types.FunctionCall = candidate.content.parts[0].function_call # Usa types do novo import
             tool_name = function_call.name
             tool_args = dict(function_call.args) # Convertido para dict
@@ -387,7 +391,7 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
             # --- FIM DA INJEÇÃO ---
 
             if tool_name in TOOL_ROUTER:
-                app.logger.info(f"[ROUTER] Roteando para a função: '{tool_name}' com args: {tool_args}")
+                print(f"[ROUTER] Roteando para a função: '{tool_name}' com args: {tool_args}", file=sys.stderr)
                 function_to_call = TOOL_ROUTER[tool_name]
                 api_result = function_to_call(**tool_args)
                 
@@ -395,7 +399,7 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
                 response_final = gemini_model.generate_content([full_prompt, candidate.content, tool_response_part])
                 txt = response_final.candidates[0].content.parts[0].text
             else:
-                app.logger.warning(f"[ROUTER] Ferramenta '{tool_name}' não encontrada no roteador.")
+                print(f"[ROUTER] Ferramenta '{tool_name}' não encontrada no roteador.", file=sys.stderr)
                 txt = "Desculpe, tentei usar uma ferramenta que não conheço."
         
         else:
@@ -405,7 +409,7 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
             return "Poderia repetir, por favor?"
         return txt.strip()
     except Exception as e:
-        app.logger.exception(f"[GEMINI] Erro geral ao gerar resposta: {e}")
+        print(f"[GEMINI] Erro geral ao gerar resposta: {e}", file=sys.stderr)
         return "Desculpe, tive um problema para processar sua solicitação."
 
 
@@ -418,7 +422,7 @@ def home():
 def process_message(data):
     # A lógica de processamento do webhook (a parte que demora)
     try:
-        app.logger.info("[PROCESSOR] Thread iniciada.") # <-- LOG DE DEPURAÇÃO
+        print("[PROCESSOR] Thread iniciada.", file=sys.stderr) # <-- LOG DE DEPURAÇÃO
         envelope = data.get("data", data)
         if isinstance(envelope, list) and envelope: envelope = envelope[0]
         if not isinstance(envelope, dict): return 
@@ -430,7 +434,7 @@ def process_message(data):
         # Lógica de Deduplicação
         msg_id = key.get("id") or envelope.get("idMessage") or ""
         if msg_id and msg_id in PROCESSED_IDS: 
-            app.logger.info(f"Ignorando mensagem duplicada: {msg_id}")
+            print(f"Ignorando mensagem duplicada: {msg_id}", file=sys.stderr)
             return 
         if msg_id: PROCESSED_IDS.append(msg_id)
         
@@ -442,7 +446,7 @@ def process_message(data):
         number = client_phone_normalized
         text = extract_text(message).strip()
         if not text: 
-            app.logger.info("[PROCESSOR] Texto vazio, encerrando thread.")
+            print("[PROCESSOR] Texto vazio, encerrando thread.", file=sys.stderr)
             return 
         if number not in CHAT_SESSIONS: CHAT_SESSIONS[number] = []
         current_history = CHAT_SESSIONS[number]
@@ -450,9 +454,9 @@ def process_message(data):
         initial_context = ""
         # Chamada de API para contexto é mantida aqui
         if not current_history: 
-            app.logger.info(f"[PROCESSOR] Nova sessão, buscando cliente: {client_phone_normalized}")
+            print(f"[PROCESSOR] Nova sessão, buscando cliente: {client_phone_normalized}", file=sys.stderr)
             search_result = call_api_consultar_cliente_por_telefone(client_phone_normalized)
-            app.logger.info(f"[PROCESSOR] Resultado da busca: {search_result.get('status')}") # <-- LOG DE DEPURAÇÃO
+            print(f"[PROCESSOR] Resultado da busca: {search_result.get('status')}", file=sys.stderr) # <-- LOG DE DEPURAÇÃO
             
             if search_result.get("status") == "nao_encontrado":
                 initial_context = f"AVISO: O sistema não encontrou nenhum cliente associado ao telefone {client_phone_normalized}. Peça o primeiro nome para cadastrar."
@@ -462,9 +466,9 @@ def process_message(data):
                 client_name = search_result.get("name") or "Cliente" 
                 initial_context = f"CONTEXTO INICIAL: O número de telefone {client_phone_normalized} pertence ao cliente '{client_name}' (ID {search_result.get('id')}). O bot DEVE usar o nome do cliente na resposta e NÃO DEVE perguntar o telefone novamente."
         
-        app.logger.info("[PROCESSOR] Chamando answer_with_gemini...")
+        print("[PROCESSOR] Chamando answer_with_gemini...", file=sys.stderr)
         reply = answer_with_gemini(text, current_history, initial_context, client_phone_normalized)
-        app.logger.info(f"[PROCESSOR] Resposta do Gemini recebida: {reply[:50]}...") # <-- LOG DE DEPURAÇÃO
+        print(f"[PROCESSOR] Resposta do Gemini recebida: {reply[:50]}...", file=sys.stderr) # <-- LOG DE DEPURAÇÃO
         
         CHAT_SESSIONS[number].append(f"Cliente: {text}")
         CHAT_SESSIONS[number].append(f"Atendente: {reply}")
@@ -472,17 +476,17 @@ def process_message(data):
             CHAT_SESSIONS[number].pop(0)
 
         if not (EVOLUTION_KEY and EVOLUTION_URL_BASE and EVOLUTION_INSTANCE):
-            app.logger.warning("[EVOLUTION] Variáveis de ambiente ausentes. Encerrando thread.")
+            print("[EVOLUTION] Variáveis de ambiente ausentes. Encerrando thread.", file=sys.stderr)
             return 
         
-        app.logger.info("[PROCESSOR] Enviando resposta para Evolution API...")
+        print("[PROCESSOR] Enviando resposta para Evolution API...", file=sys.stderr)
         url_send = f"{EVOLUTION_URL_BASE}/message/sendtext/{EVOLUTION_INSTANCE}"
         headers = {"apikey": EVOLUTION_KEY, "Content-Type": "application/json"}
         payload = {"number": number, "text": reply}
         res = requests.post(url_send, json=payload, headers=headers, timeout=20)
-        app.logger.info(f"[EVOLUTION] {res.status_code} -> {res.text}")
+        print(f"[EVOLUTION] {res.status_code} -> {res.text}", file=sys.stderr)
     except Exception as e:
-        app.logger.exception(f"[PROCESSOR] ERRO FATAL no processamento assíncrono: {e}")
+        print(f"[PROCESSOR] ERRO FATAL no processamento assíncrono: {e}", file=sys.stderr)
 
 
 @app.route("/webhook/messages-upsert", methods=["POST"])
@@ -490,6 +494,11 @@ def webhook_messages_upsert():
     # Retorno imediato (200 OK) para evitar reenvio do Evolution
     data = request.get_json(silent=True) or {}
     
+    # --- NOVO LOG DE DEPURAÇÃO (Sugerido pelo GPT) ---
+    # Vamos logar o payload bruto que a Evolution API está enviando
+    print(f"[DEBUG] Webhook Payload Recebido: {json.dumps(data)}", file=sys.stderr)
+    # --- FIM DO LOG ---
+
     # Inicia o processamento pesado em segundo plano
     threading.Thread(target=process_message, args=(data,)).start()
 
