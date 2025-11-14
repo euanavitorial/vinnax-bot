@@ -1,4 +1,4 @@
 Flask==3.0.3
 gunicorn==23.0.0
 requests==2.32.3
-google-genai==0.3.0  # VERSÃO ESTÁVEL ANTERIOR E COM SINTAXE QUE SEU CÓDIGO USA
+google-generativeai==0.7.1
