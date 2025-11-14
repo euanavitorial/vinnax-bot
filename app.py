@@ -7,15 +7,14 @@ import threading
 from flask import Flask, request, jsonify
 import requests
 
-# --- CORREÇÃO DE IMPORTAÇÃO FINAL (Para v0.7.1+) ---
+# --- IMPORTAÇÃO ESTÁVEL (v0.7.1+) ---
 try:
     from google import generativeai as genai
-    # 'types' agora é importado diretamente de 'generativeai'
     from google.generativeai import types
 except ImportError:
     genai = None
     types = None
-# --- FIM DA CORREÇÃO ---
+# --- FIM DA IMPORTAÇÃO ---
 
 
 # ====== Config (via variáveis de ambiente) ======
@@ -24,7 +23,6 @@ EVOLUTION_URL_BASE = os.environ.get("EVOLUTION_URL_BASE", "")
 EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-# Usando o modelo novo, compatível com a biblioteca nova
 GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "models/gemini-1.5-pro-latest") 
 
 # --- SUAS APIS (ENDPOINTS) ---
@@ -255,7 +253,8 @@ def call_api_excluir_orcamento(id_orcamento: str) -> Dict[str, Any]:
 # ======================================================================
 TOOLS_MENU = [
     # --- CLIENTE (5) ---
-    {"name": "criar_cliente", "description": "Cadastra um novo cliente no sistema. Requer nome e pelo menos telefone ou email.", "parameters": {"type_": "OBJECT", "properties": {"nome": {"type": "STRING"}, "telefone": {"type": "STRING"}, "email": {"type": "STRING"}}, "required": ["nome"]}},
+    # **CORREÇÃO AQUI**: Removido 'telefone' dos parâmetros da IA.
+    {"name": "criar_cliente", "description": "Cadastra um novo cliente no sistema. Requer o nome do cliente. O telefone é pego automaticamente.", "parameters": {"type_": "OBJECT", "properties": {"nome": {"type": "STRING"}, "email": {"type": "STRING", "description": "Email (opcional)."}}, "required": ["nome"]}},
     {"name": "consultar_cliente_por_id", "description": "Busca os detalhes de um cliente (telefone, email, etc.) usando o ID do cliente.", "parameters": {"type_": "OBJECT", "properties": {"id_cliente": {"type": "INTEGER"}}, "required": ["id_cliente"]}},
     {"name": "consultar_cliente_por_telefone", "description": "Busca os detalhes de um cliente usando o número de telefone. Use para verificar se um novo cliente já está cadastrado.", "parameters": {"type_": "OBJECT", "properties": {"telefone": {"type": "STRING"}}, "required": ["telefone"]}},
     {"name": "atualizar_cliente", "description": "Modifica informações de um cliente existente usando o ID do cliente.", "parameters": {"type_": "OBJECT", "properties": {"id_cliente": {"type": "INTEGER"}, "nome": {"type": "STRING"}, "telefone": {"type": "STRING"}, "email": {"type": "STRING"}}, "required": ["id_cliente"]}},
@@ -304,7 +303,7 @@ TOOL_ROUTER: Dict[str, Callable[..., Dict[str, Any]]] = {
 }
 
 
-# ====== Inicialização do Gemini (USANDO O genai CORRIGIDO) ======
+# ====== Inicialização do Gemini (AGORA USANDO O genai CORRIGIDO) ======
 gemini_model = None
 if GEMINI_API_KEY and genai:
     try:
@@ -322,9 +321,9 @@ else:
 
 
 # ======================================================================
-# LÓGICA DE RESPOSTA DO BOT (MANTIDA)
+# LÓGICA DE RESPOSTA DO BOT (COM PROMPT FOCADO NO CLIENTE)
 # ======================================================================
-def answer_with_gemini(user_text: str, chat_history: List[str], initial_context: str = "") -> str:
+def answer_with_gemini(user_text: str, chat_history: List[str], initial_context: str = "", client_phone: str = None) -> str:
     # A verificação é mais robusta agora.
     if not gemini_model: 
         return "Olá! Que bom ter você aqui. Estou com uma pequena dificuldade técnica para acessar minhas ferramentas de inteligência, mas me diga: qual é o seu nome e como posso te ajudar hoje?"
@@ -335,7 +334,7 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
             "focado em **coletar informações de pedidos passo a passo (Serviço > Material > Medida > Quantidade > Entrega)** e fornecer informações. "
             "1. **PRIORIDADE:** Se houver pedidos em andamento ou orçamentos pendentes, mencione-os ANTES de oferecer novos serviços. "
             "2. **SAUDAÇÃO:** Use saudação baseada no horário, use SEMPRE o primeiro nome do cliente e seja caloroso e humanizado. "
-            "3. **CADASTRO:** Se o CONTEXTO INICIAL indicar que o cliente NÃO foi encontrado, e ele fornecer o nome, use `criar_cliente` imediatamente com o telefone do contexto. "
+            "3. **CADASTRO:** Se o CONTEXTO INICIAL indicar que o cliente NÃO foi encontrado, peça o **primeiro nome** do cliente. Quando o cliente responder o nome, use a ferramenta `criar_cliente` imediatamente. **NUNCA PERGUNTE O TELEFONE**, ele será pego automaticamente. "
             "4. **ORÇAMENTOS/OS:** Se o cliente pedir um novo serviço, use `consultar_produtos_todos` (ou similar) para listar os serviços SEM PREÇOS e inicie o FLUXO DE COLETA de dados (material, medida, quantidade). Ao final, use `criar_orcamento` ou `criar_ordem_servico`. "
             "5. **FLUXO:** Nunca pule a etapa de RESUMO E CONFIRMAÇÃO antes de finalizar um pedido. Não use números (1, 2, 3) em listas. Não invente preços ou quantidades. "
             "6. **COMPORTAMENTO:** Não responda a comandos de gestão interna (Ex: 'Abrir Caixa', 'Consultar Finanças'). Se receber um, responda: 'Meu foco é o atendimento ao cliente e informações sobre pedidos e orçamentos. Para gestão interna, por favor, use o sistema.' Responda em português. "
@@ -355,14 +354,20 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
         
         if candidate.finish_reason == "TOOL_USE":
             app.logger.info("[GEMINI] Pedido de 'Tool Use' detectado.")
-            function_call: types.FunctionCall = candidate.content.parts[0].function_call # Usa types do novo import
+            function_call: types.FunctionCall = candidate.content.parts[0].function_call
             tool_name = function_call.name
-            tool_args = function_call.args
+            tool_args = dict(function_call.args) # Convertido para dict
             
+            # --- INJEÇÃO DE TELEFONE (A CORREÇÃO LÓGICA) ---
+            if tool_name == "criar_cliente" and client_phone:
+                tool_args['telefone'] = client_phone
+            # --- FIM DA INJEÇÃO ---
+
             if tool_name in TOOL_ROUTER:
-                app.logger.info(f"[ROUTER] Roteando para a função: '{tool_name}'")
+                app.logger.info(f"[ROUTER] Roteando para a função: '{tool_name}' com args: {tool_args}")
                 function_to_call = TOOL_ROUTER[tool_name]
-                api_result = function_to_call(**dict(tool_args))
+                api_result = function_to_call(**tool_args)
+                
                 tool_response_part = {"function_response": {"name": tool_name, "response": {"content": json.dumps(api_result)}}}
                 response_final = gemini_model.generate_content([full_prompt, candidate.content, tool_response_part])
                 txt = response_final.candidates[0].content.parts[0].text
@@ -420,14 +425,15 @@ def process_message(data):
         if not current_history: 
             search_result = call_api_consultar_cliente_por_telefone(client_phone)
             if search_result.get("status") == "nao_encontrado":
-                initial_context = f"AVISO: O sistema não encontrou nenhum cliente associado ao telefone {client_phone}. Peça o nome para cadastrar."
+                initial_context = f"AVISO: O sistema não encontrou nenhum cliente associado ao telefone {client_phone}. Peça o primeiro nome para cadastrar."
             elif search_result.get("status") == "erro":
                  initial_context = f"AVISO: O sistema não pôde buscar clientes devido a um erro na API."
             else:
                 client_name = search_result.get("name") or "Cliente" 
                 initial_context = f"CONTEXTO INICIAL: O número de telefone {client_phone} pertence ao cliente '{client_name}' (ID {search_result.get('id')}). O bot DEVE usar o nome do cliente na resposta e NÃO DEVE perguntar o telefone novamente."
         
-        reply = answer_with_gemini(text, current_history, initial_context)
+        # Passando o client_phone para o cérebro
+        reply = answer_with_gemini(text, current_history, initial_context, client_phone)
         
         CHAT_SESSIONS[number].append(f"Cliente: {text}")
         CHAT_SESSIONS[number].append(f"Atendente: {reply}")
@@ -444,7 +450,7 @@ def process_message(data):
         res = requests.post(url_send, json=payload, headers=headers, timeout=20)
         app.logger.info(f"[EVOLUTION] {res.status_code} -> {res.text}")
     except Exception as e:
-        app.logger.exception(f"[PROCESSOR] Erro no processamento assíncRono: {e}")
+        app.logger.exception(f"[PROCESSOR] Erro no processamento assíncrono: {e}")
 
 
 @app.route("/webhook/messages-upsert", methods=["POST"])
