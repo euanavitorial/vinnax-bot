@@ -16,7 +16,7 @@ EVOLUTION_KEY = os.environ.get("EVOLUTION_KEY", "")
 EVOLUTION_URL_BASE = os.environ.get("EVOLUTION_URL_BASE", "")
 EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 
-# --- NOVAS CHAVES DO SUPABASE (Lovable) ---
+# --- CHAVES DO SUPABASE (Lovable) ---
 # A URL da sua função principal de IA (do seu ajudante)
 SUPABASE_PROCESS_URL = "https://ebiitbpdvskreiuoeyaz.supabase.co/functions/v1/process-with-ai"
 # A chave "Anon" ou "Public" do seu Supabase (NÃO é a LOVABLE_API_KEY)
@@ -49,6 +49,7 @@ def process_message(data):
     """Função que é executada em segundo plano para não dar timeout."""
     try:
         print("\n--- [PROCESSOR] Thread iniciada. ---", file=sys.stderr)
+        
         envelope = data.get("data", data)
         if isinstance(envelope, list) and envelope: envelope = envelope[0]
         if not isinstance(envelope, dict): return 
@@ -71,9 +72,11 @@ def process_message(data):
         contact_name = data.get("pushName", "")
         instance_name = data.get("instance", "VINNAXBEAUTY")
 
-        if not text: 
+        # --- ✅ CORREÇÃO DO NAMEERROR ESTÁ AQUI ---
+        if not message_text: # Era "if not text:", agora está correto
             print("[PROCESSOR] Texto vazio, encerrando thread.", file=sys.stderr)
             return 
+        # --- FIM DA CORREÇÃO ---
 
         if not (SUPABASE_PROCESS_URL and SUPABASE_ANON_KEY):
             print("[PROCESSOR] ERRO FATAL: SUPABASE_PROCESS_URL ou SUPABASE_ANON_KEY não configuradas no Render.", file=sys.stderr)
@@ -122,11 +125,11 @@ def process_message(data):
         print(f"[PROCESSOR] ERRO FATAL no processamento assíncrono: {e}", file=sys.stderr)
         # Tenta enviar um erro para o usuário
         try:
-            jid = (key.get("remoteJid") or envelope.get("participant") or "").strip()
-            url_send = f"{EVOLUTION_URL_BASE}/message/sendtext/{EVOLUTION_INSTANCE}"
-            headers_evo = {"apikey": EVOLUTION_KEY, "Content-Type": "application/json"}
-            payload_evo = {"number": jid, "text": "Desculpe, ocorreu um erro interno. Tente novamente."}
-            requests.post(url_send, json=payload_evo, headers=headers_evo, timeout=20)
+            if 'jid' in locals() and jid: # Verifica se jid existe
+                url_send = f"{EVOLUTION_URL_BASE}/message/sendtext/{EVOLUTION_INSTANCE}"
+                headers_evo = {"apikey": EVOLUTION_KEY, "Content-Type": "application/json"}
+                payload_evo = {"number": jid, "text": "Desculpe, ocorreu um erro interno. Tente novamente."}
+                requests.post(url_send, json=payload_evo, headers=headers_evo, timeout=20)
         except:
             pass # Falha silenciosa se não conseguir enviar o erro
 
