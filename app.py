@@ -4,7 +4,8 @@ from collections import deque
 from typing import Any, Dict, List, Callable
 import threading 
 import re # Importado para limpeza do telefone
-import sys # Importado para logs de depuração (stderr)
+import sys 
+from requests.exceptions import HTTPError # Importado para capturar erros de API
 
 from flask import Flask, request, jsonify
 import requests
@@ -60,19 +61,19 @@ def get_auth_headers():
         "Content-Type": "application/json"
     }
 
-# --- FUNÇÃO DE NORMALIZAÇÃO MELHORADA (COM SUGESTÃO DO GPT) ---
+# --- FUNÇÃO DE NORMALIZAÇÃO OTIMIZADA (COM REGEX) ---
 def normalize_phone(phone: str) -> str:
-    """Normaliza número de telefone vindo do WhatsApp JID para formato nacional sem DDI e sem 0 extra."""
-    phone = phone.replace("@s.whatsapp.net", "").strip()
-    
-    # Remove código do país se for brasileiro
+    """Normaliza número de telefone vindo do WhatsApp JID para formato nacional sem DDI."""
+    phone = re.sub(r'@s\.whatsapp\.net$', '', phone) # Remove o sufixo
+        
+    # Remove o DDI 55 se presente
     if phone.startswith("55"):
         phone = phone[2:]
-    
-    # Remove 0 após o DDD se presente (ex: 64099388707 -> 6499388707)
-    if len(phone) >= 11 and phone[2] == "0":
-        phone = phone[:2] + phone[3:]
-
+            
+    # Remove o zero após o DDD (ex: 64099388707 -> 6499388707)
+    # Padrão: (DD)0(9XXXX-XXXX)
+    phone = re.sub(r'^(\d{2})0(\d{9})$', r'\1\2', phone)
+        
     return phone
 
 
@@ -80,21 +81,28 @@ def normalize_phone(phone: str) -> str:
 # PASSO 2: AS FUNÇÕES REAIS DA API (20 Funções, Sintaxe Corrigida)
 # ======================================================================
 
+# --- FUNÇÃO DE LOG DE ERRO ---
+def log_api_error(e: Exception, function_name: str) -> Dict[str, Any]:
+    """Loga detalhadamente erros de API, incluindo a resposta HTTP se disponível."""
+    if isinstance(e, HTTPError):
+        error_message = f"Erro {e.response.status_code}: {e.response.text}"
+    else:
+        error_message = str(e)
+    
+    print(f"[API_CALL] Erro em {function_name}: {error_message}", file=sys.stderr)
+    return {"status": "erro", "mensagem": f"Erro interno ao chamar {function_name}: {error_message}"}
+
 # --- FUNÇÕES DE CLIENTE (5) ---
 def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
-        # Garantindo que o telefone a ser cadastrado está normalizado
         telefone_normalizado = normalize_phone(telefone) if telefone else None
-        
         payload = {"name": nome, "phone": telefone_normalizado, "email": email}
         payload = {k: v for k, v in payload.items() if v is not None} 
         response = requests.post(CLIENTE_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e: 
-        print(f"[API_CALL] Erro em call_api_criar_cliente: {e}", file=sys.stderr)
-        return {"status": "erro", "mensagem": f"Erro ao criar cliente: {e}"}
+    except Exception as e: return log_api_error(e, "criar_cliente")
 
 def call_api_consultar_cliente_por_id(id_cliente: int) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
@@ -103,9 +111,7 @@ def call_api_consultar_cliente_por_id(id_cliente: int) -> Dict[str, Any]:
         response = requests.get(url, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e: 
-        print(f"[API_CALL] Erro em call_api_consultar_cliente_por_id: {e}", file=sys.stderr)
-        return {"status": "erro", "mensagem": f"Erro ao consultar cliente: {e}"}
+    except Exception as e: return log_api_error(e, "consultar_cliente_por_id")
 
 def call_api_consultar_cliente_por_telefone(telefone: str) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): 
@@ -113,8 +119,6 @@ def call_api_consultar_cliente_por_telefone(telefone: str) -> Dict[str, Any]:
         return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
         telefone_normalizado = normalize_phone(telefone)
-        print(f"[API_CALL] Buscando cliente por telefone: {telefone_normalizado}", file=sys.stderr)
-        
         response = requests.get(CLIENTE_API_ENDPOINT, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         
@@ -124,15 +128,9 @@ def call_api_consultar_cliente_por_telefone(telefone: str) -> Dict[str, Any]:
              return {"status": "erro", "mensagem": "Resposta inesperada da API de Clientes."}
 
         cliente_encontrado = [c for c in clientes if c.get('phone') == telefone_normalizado]
-        if cliente_encontrado: 
-            print("[API_CALL] Cliente encontrado.", file=sys.stderr)
-            return cliente_encontrado[0] 
-        else: 
-            print("[API_CALL] Cliente não encontrado.", file=sys.stderr)
-            return {"status": "nao_encontrado", "mensagem": f"Nenhum cliente encontrado com o telefone {telefone_normalizado}."}
-    except Exception as e: 
-        print(f"[API_CALL] Erro em call_api_consultar_cliente_por_telefone: {e}", file=sys.stderr)
-        return {"status": "erro", "mensagem": f"Erro ao consultar cliente por telefone: {e}"}
+        if cliente_encontrado: return cliente_encontrado[0] 
+        else: return {"status": "nao_encontrado", "mensagem": f"Nenhum cliente encontrado com o telefone {telefone_normalizado}."}
+    except Exception as e: return log_api_error(e, "consultar_cliente_por_telefone")
 
 def call_api_atualizar_cliente(id_cliente: int, nome: str = None, telefone: str = None, email: str = None) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
@@ -143,7 +141,7 @@ def call_api_atualizar_cliente(id_cliente: int, nome: str = None, telefone: str 
         response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao atualizar cliente: {e}"}
+    except Exception as e: return log_api_error(e, "atualizar_cliente")
 
 def call_api_excluir_cliente(id_cliente: int) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
@@ -153,7 +151,7 @@ def call_api_excluir_cliente(id_cliente: int) -> Dict[str, Any]:
         response.raise_for_status()
         if response.status_code == 204: return {"status": "sucesso", "mensagem": f"Cliente ID {id_cliente} excluído com sucesso."}
         return response.json()
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao excluir cliente: {e}"}
+    except Exception as e: return log_api_error(e, "excluir_cliente")
         
 # --- FUNÇÕES DE PRODUTO (5) ---
 def call_api_criar_produto(nome: str, tipo: str, preco: float) -> Dict[str, Any]:
@@ -163,7 +161,7 @@ def call_api_criar_produto(nome: str, tipo: str, preco: float) -> Dict[str, Any]
         response = requests.post(PRODUTO_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao criar produto: {e}"}
+    except Exception as e: return log_api_error(e, "criar_produto")
 
 def call_api_consultar_produto_por_id(id_produto: int) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and PRODUTO_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Produto não configurada."}
@@ -172,7 +170,7 @@ def call_api_consultar_produto_por_id(id_produto: int) -> Dict[str, Any]:
         response = requests.get(url, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao consultar produto: {e}"}
+    except Exception as e: return log_api_error(e, "consultar_produto_por_id")
 
 def call_api_consultar_produtos_todos() -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and PRODUTO_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Produto não configurada."}
@@ -180,7 +178,7 @@ def call_api_consultar_produtos_todos() -> Dict[str, Any]:
         response = requests.get(PRODUTO_API_ENDPOINT, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao listar produtos: {e}"}
+    except Exception as e: return log_api_error(e, "listar_produtos")
 
 def call_api_atualizar_produto(id_produto: int, nome: str = None, tipo: str = None, preco: float = None) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and PRODUTO_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Produto não configurada."}
@@ -191,7 +189,7 @@ def call_api_atualizar_produto(id_produto: int, nome: str = None, tipo: str = No
         response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao atualizar produto: {e}"}
+    except Exception as e: return log_api_error(e, "atualizar_produto")
 
 def call_api_excluir_produto(id_produto: int) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and PRODUTO_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Produto não configurada."}
@@ -201,7 +199,7 @@ def call_api_excluir_produto(id_produto: int) -> Dict[str, Any]:
         response.raise_for_status()
         if response.status_code == 204: return {"status": "sucesso", "mensagem": f"Produto ID {id_produto} excluído com sucesso."}
         return response.json()
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao excluir produto: {e}"}
+    except Exception as e: return log_api_error(e, "excluir_produto")
 
 # --- FUNÇÕES DE ORDEM DE SERVIÇO (OS) (5) ---
 def call_api_criar_os(client_id: str, product_id: str, description: str, total_price: float, deadline: str = None) -> Dict[str, Any]:
@@ -212,7 +210,7 @@ def call_api_criar_os(client_id: str, product_id: str, description: str, total_p
         response = requests.post(OS_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao criar OS: {e}"}
+    except Exception as e: return log_api_error(e, "criar_os")
 
 def call_api_consultar_os_por_id(id_os: str) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and OS_API_ENDPOINT): return {"status": "erro", "mensagem": "API de OS não configurada."}
@@ -221,7 +219,7 @@ def call_api_consultar_os_por_id(id_os: str) -> Dict[str, Any]:
         response = requests.get(url, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao consultar OS: {e}"}
+    except Exception as e: return log_api_error(e, "consultar_os_por_id")
 
 def call_api_consultar_ordens_servico_todas() -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and OS_API_ENDPOINT): return {"status": "erro", "mensagem": "API de OS não configurada."}
@@ -229,7 +227,7 @@ def call_api_consultar_ordens_servico_todas() -> Dict[str, Any]:
         response = requests.get(OS_API_ENDPOINT, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao listar todas as OS: {e}"}
+    except Exception as e: return log_api_error(e, "listar_os")
 
 def call_api_atualizar_os(id_os: str, status: str = None, total_price: float = None) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and OS_API_ENDPOINT): return {"status": "erro", "mensagem": "API de OS não configurada."}
@@ -240,7 +238,7 @@ def call_api_atualizar_os(id_os: str, status: str = None, total_price: float = N
         response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao atualizar OS: {e}"}
+    except Exception as e: return log_api_error(e, "atualizar_os")
 
 def call_api_excluir_os(id_os: str) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and OS_API_ENDPOINT): return {"status": "erro", "mensagem": "API de OS não configurada."}
@@ -250,7 +248,7 @@ def call_api_excluir_os(id_os: str) -> Dict[str, Any]:
         response.raise_for_status()
         if response.status_code == 204: return {"status": "sucesso", "mensagem": f"OS ID {id_os} excluída com sucesso."}
         return response.json()
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao excluir OS: {e}"}
+    except Exception as e: return log_api_error(e, "excluir_os")
 
 # --- FUNÇÕES DE ORÇAMENTOS (5) ---
 def call_api_criar_orcamento(client_id: str, product_id: str, description: str) -> Dict[str, Any]:
@@ -260,7 +258,7 @@ def call_api_criar_orcamento(client_id: str, product_id: str, description: str) 
         response = requests.post(ORCAMENTO_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao criar orçamento: {e}"}
+    except Exception as e: return log_api_error(e, "criar_orcamento")
 
 def call_api_consultar_orcamento_por_id(id_orcamento: str) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and ORCAMENTO_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Orçamento não configurada."}
@@ -269,7 +267,7 @@ def call_api_consultar_orcamento_por_id(id_orcamento: str) -> Dict[str, Any]:
         response = requests.get(url, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao consultar orçamento: {e}"}
+    except Exception as e: return log_api_error(e, "consultar_orcamento_por_id")
 
 def call_api_consultar_orcamentos_todos() -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and ORCAMENTO_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Orçamento não configurada."}
@@ -277,7 +275,7 @@ def call_api_consultar_orcamentos_todos() -> Dict[str, Any]:
         response = requests.get(ORCAMENTO_API_ENDPOINT, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao listar orçamentos: {e}"}
+    except Exception as e: return log_api_error(e, "listar_orcamentos")
 
 def call_api_atualizar_orcamento(id_orcamento: str, quoted_price: float = None, status: str = None) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and ORCAMENTO_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Orçamento não configurada."}
@@ -288,7 +286,7 @@ def call_api_atualizar_orcamento(id_orcamento: str, quoted_price: float = None, 
         response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao atualizar orçamento: {e}"}
+    except Exception as e: return log_api_error(e, "atualizar_orcamento")
 
 def call_api_excluir_orcamento(id_orcamento: str) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and ORCAMENTO_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Orçamento não configurada."}
@@ -298,7 +296,7 @@ def call_api_excluir_orcamento(id_orcamento: str) -> Dict[str, Any]:
         response.raise_for_status()
         if response.status_code == 204: return {"status": "sucesso", "mensagem": f"Orçamento ID {id_orcamento} excluído com sucesso."}
         return response.json()
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao excluir orçamento: {e}"}
+    except Exception as e: return log_api_error(e, "excluir_orcamento")
 
 
 # ======================================================================
@@ -328,7 +326,7 @@ TOOLS_MENU = [
     {"name": "consultar_orcamento_por_id", "description": "Busca os detalhes de um orçamento (preço cotado, status) usando o ID do orçamento.", "parameters": {"type_": "OBJECT", "properties": {"id_orcamento": {"type": "STRING", "description": "O ID (UUID) do Orçamento."}}, "required": ["id_orcamento"]}},
     {"name": "consultar_orcamentos_todos", "description": "Lista todos os orçamentos cadastrados no sistema.", "parameters": {"type_": "OBJECT", "properties": {}}},
     {"name": "atualizar_orcamento", "description": "Modifica o preço ou status de um orçamento existente. O preço cotado é o 'quoted_price'.", "parameters": {"type_": "OBJECT", "properties": {"id_orcamento": {"type": "STRING"}, "quoted_price": {"type": "NUMBER"}, "status": {"type": "STRING"}}, "required": ["id_orcamento"]}},
-    {"name": "excluir_orcamento", "description": "Deleta permanentemente um orçamento do sistema usando o ID.", "parameters": {"type_": "OBJECT", "properties": {"id_orcamento": {"type": "STRING", "description": "O ID (UUID) do orçamento a ser excluído."}}, "required": ["id_orcamento"]}}
+    {"name":S": "excluir_orcamento", "description": "Deleta permanentemente um orçamento do sistema usando o ID.", "parameters": {"type_": "OBJECT", "properties": {"id_orcamento": {"type": "STRING", "description": "O ID (UUID) do orçamento a ser excluído."}}, "required": ["id_orcamento"]}}
 ]
 
 
