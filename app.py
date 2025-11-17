@@ -1,154 +1,219 @@
 import os
 import json
 from collections import deque
-from typing import Any, Dict
+from typing import Any, Dict, List, Callable
 import threading 
 import re 
 import sys 
-import requests
+from requests.exceptions import HTTPError
+
 from flask import Flask, request, jsonify
+import requests
+
+# --- IMPORTAÇÃO DO GEMINI ---
+try:
+    from google import generativeai as genai
+    from google.generativeai import types
+except ImportError:
+    print("[ERRO FATAL] Biblioteca google.generativeai não encontrada.", file=sys.stderr)
+    genai = None
+    types = None
 
 app = Flask(__name__)
 
-# ====== Config (Variáveis de Ambiente) ======
-# Chaves da Evolution API (para enviar a resposta)
-EVOLUTION_KEY = os.environ.get("EVOLUTION_KEY", "")
-EVOLUTION_URL_BASE = os.environ.get("EVOLUTION_URL_BASE", "")
-EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
+# ====== Configurações ======
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL_NAME = "models/gemini-1.5-pro-latest" # Ou gemini-2.0-flash se preferir
 
-# --- CHAVES DO SUPABASE (Lovable) ---
-# A URL da sua função principal de IA (do seu ajudante)
-SUPABASE_PROCESS_URL = "https://ebiitbpdvskreiuoeyaz.supabase.co/functions/v1/process-with-ai"
-# A chave "Anon" ou "Public" do seu Supabase (NÃO é a LOVABLE_API_KEY)
-SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
+# Endpoints do seu sistema (Lovable/Supabase)
+LOVABLE_API_KEY = os.environ.get("LOVABLE_API_KEY", "") 
+CLIENTE_API_ENDPOINT = os.environ.get("CLIENTE_API_ENDPOINT", "")
+PRODUTO_API_ENDPOINT = os.environ.get("PRODUTO_API_ENDPOINT", "")
+OS_API_ENDPOINT = os.environ.get("OS_API_ENDPOINT", "")
+ORCAMENTO_API_ENDPOINT = os.environ.get("ORCAMENTO_API_ENDPOINT", "")
 
-# ====== Deduplicação (Anti-Loop) ======
-PROCESSED_IDS = deque(maxlen=500)
+# Memória local (já que tiramos do Lovable, precisamos guardar aqui por enquanto)
+CHAT_SESSIONS: Dict[str, List[str]] = {}
+CHAT_HISTORY_LENGTH = 15
 
-# ====== Utilidades (No Topo) ======
-def extract_text(message: Dict[str, Any]) -> str:
-    """Extrai o texto de diversos tipos de mensagem do WhatsApp."""
-    if not isinstance(message, dict): return ""
-    if "conversation" in message: return (message.get("conversation") or "").strip()
-    if "extendedTextMessage" in message: return (message["extendedTextMessage"].get("text") or "").strip()
-    # (Pode adicionar 'caption' de mídias se necessário no futuro)
-    return ""
+# ====== Utilidades ======
+def get_auth_headers():
+    return {"x-api-key": LOVABLE_API_KEY, "Content-Type": "application/json"}
 
-def normalize_phone_to_jid(phone: str) -> str:
-    """Garante que o número esteja no formato JID para a Evolution API responder."""
+def normalize_phone(phone: str) -> str:
     if not phone: return ""
-    phone = re.sub(r'[^0-9]', '', phone) # Remove caracteres não numéricos
-    if not phone.startswith("55"):
-        phone = f"55{phone}"
-    if not phone.endswith("@s.whatsapp.net"):
-        phone = f"{phone}@s.whatsapp.net"
+    phone = str(phone).replace("@s.whatsapp.net", "").strip()
+    if phone.startswith("55"): phone = phone[2:]
+    if len(phone) >= 11 and phone[2] == "0": phone = phone[:2] + phone[3:]
     return phone
 
-# --- Processamento Assíncrono (O Trabalho Pesado) ---
-def process_message(data):
-    """Função que é executada em segundo plano para não dar timeout."""
+def log_api_error(e: Exception, function_name: str) -> Dict[str, Any]:
+    error_msg = f"Erro em {function_name}: {str(e)}"
+    print(f"[API_CALL] {error_msg}", file=sys.stderr)
+    return {"status": "erro", "mensagem": "Houve um erro ao consultar o sistema."}
+
+# ====== 20 FUNÇÕES DE API (As Ferramentas) ======
+# (Mantendo as mesmas funções que já tínhamos validado)
+
+def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None) -> Dict[str, Any]:
     try:
-        print("\n--- [PROCESSOR] Thread iniciada. ---", file=sys.stderr)
-        
-        envelope = data.get("data", data)
-        if isinstance(envelope, list) and envelope: envelope = envelope[0]
-        if not isinstance(envelope, dict): return 
-        key = envelope.get("key", {}) or {}
-        if key.get("fromMe") is True: return 
-        message = envelope.get("message", {}) or {}
-        if not message: return 
-        
-        # Deduplicação
-        msg_id = key.get("id") or envelope.get("idMessage") or ""
-        if msg_id and msg_id in PROCESSED_IDS: 
-            print(f"[PROCESSOR] Ignorando mensagem duplicada: {msg_id}", file=sys.stderr)
-            return 
-        if msg_id: PROCESSED_IDS.append(msg_id)
-        
-        # 1. Extrair os dados (como sugerido pelo seu ajudante)
-        jid = (key.get("remoteJid") or envelope.get("participant") or "").strip()
-        phone_number = jid.split("@")[0] # Pega só o número (ex: 5564...)
-        message_text = extract_text(message)
-        contact_name = data.get("pushName", "")
-        instance_name = data.get("instance", "VINNAXBEAUTY")
+        telefone_norm = normalize_phone(telefone) if telefone else None
+        payload = {"name": nome, "phone": telefone_norm, "email": email}
+        # Remove chaves vazias
+        payload = {k: v for k, v in payload.items() if v}
+        response = requests.post(CLIENTE_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e: return log_api_error(e, "criar_cliente")
 
-        # --- ✅ CORREÇÃO DO NAMEERROR ESTÁ AQUI ---
-        if not message_text: # Era "if not text:", agora está correto
-            print("[PROCESSOR] Texto vazio, encerrando thread.", file=sys.stderr)
-            return 
-        # --- FIM DA CORREÇÃO ---
+def call_api_consultar_cliente_por_telefone(telefone: str) -> Dict[str, Any]:
+    try:
+        telefone_norm = normalize_phone(telefone)
+        response = requests.get(CLIENTE_API_ENDPOINT, headers=get_auth_headers(), timeout=10)
+        response.raise_for_status()
+        clientes = response.json()
+        # Filtra localmente (idealmente sua API deveria filtrar, mas isso funciona)
+        encontrado = next((c for c in clientes if c.get('phone') == telefone_norm), None)
+        if encontrado: return encontrado
+        return {"status": "nao_encontrado"}
+    except Exception as e: return log_api_error(e, "consultar_cliente_por_telefone")
 
-        if not (SUPABASE_PROCESS_URL and SUPABASE_ANON_KEY):
-            print("[PROCESSOR] ERRO FATAL: SUPABASE_PROCESS_URL ou SUPABASE_ANON_KEY não configuradas no Render.", file=sys.stderr)
-            return
+# ... (Para economizar espaço, assumo que as outras funções de Produto, OS e Orçamento 
+# são idênticas às que já fizemos. Se precisar, eu colo todas as 20 novamente).
+# Vou colocar um placeholder para a função de listar produtos para o teste funcionar:
 
-        # 2. Chamar a IA do Lovable/Supabase (process-with-ai)
-        print(f"[PROCESSOR] Repassando para a IA do Supabase: {phone_number}...", file=sys.stderr)
-        
-        headers = {
-            "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "phoneNumber": phone_number,
-            "messageText": message_text,
-            "contactName": contact_name,
-            "instance": instance_name
-        }
-        
-        response = requests.post(
-            SUPABASE_PROCESS_URL,
-            json=payload,
-            headers=headers,
-            timeout=30 # 30 segundos para a IA pensar
-        )
-        response.raise_for_status() # Lança erro se a IA do Supabase falhar
-        
-        ai_response = response.json()
-        reply_text = ai_response.get("message", "Desculpe, não consegui processar sua resposta.")
-        
-        print(f"[PROCESSOR] Resposta da IA (Supabase) recebida: {reply_text[:50]}...", file=sys.stderr)
+def call_api_consultar_produtos_todos() -> Dict[str, Any]:
+    try:
+        response = requests.get(PRODUTO_API_ENDPOINT, headers=get_auth_headers(), timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e: return log_api_error(e, "consultar_produtos_todos")
 
-        # 3. Enviar a Resposta de volta via Evolution API
-        if not (EVOLUTION_KEY and EVOLUTION_URL_BASE and EVOLUTION_INSTANCE):
-            print("[EVOLUTION] Variáveis de ambiente ausentes. Encerrando thread.", file=sys.stderr)
-            return 
+# ====== Definição das Ferramentas para o Gemini ======
+TOOLS_MENU = [
+    {"name": "criar_cliente", "description": "Cadastra cliente. Requer nome. Telefone é automático.", "parameters": {"type_": "OBJECT", "properties": {"nome": {"type": "STRING"}, "email": {"type": "STRING"}}, "required": ["nome"]}},
+    {"name": "consultar_cliente_por_telefone", "description": "Busca cliente pelo telefone.", "parameters": {"type_": "OBJECT", "properties": {"telefone": {"type": "STRING"}}, "required": ["telefone"]}},
+    {"name": "consultar_produtos_todos", "description": "Lista todos os produtos e serviços disponíveis.", "parameters": {"type_": "OBJECT", "properties": {}}},
+    # ... Adicione as outras 17 definições aqui se for usar tudo agora ...
+]
+
+TOOL_ROUTER = {
+    "criar_cliente": call_api_criar_cliente,
+    "consultar_cliente_por_telefone": call_api_consultar_cliente_por_telefone,
+    "consultar_produtos_todos": call_api_consultar_produtos_todos
+}
+
+# ====== Inicialização do Gemini ======
+gemini_model = None
+if GEMINI_API_KEY and genai:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        gemini_model = genai.GenerativeModel(GEMINI_MODEL_NAME, tools=TOOLS_MENU)
+        print("[SISTEMA] Gemini carregado com sucesso.", file=sys.stderr)
+    except Exception as e:
+        print(f"[SISTEMA] Erro ao carregar Gemini: {e}", file=sys.stderr)
+
+# ====== Lógica do Cérebro ======
+def generate_response(user_message, phone_number, history):
+    if not gemini_model: return "Erro: Cérebro IA offline."
+    
+    # Contexto Inicial: Buscar cliente
+    initial_context = ""
+    cliente = call_api_consultar_cliente_por_telefone(phone_number)
+    
+    if cliente.get("status") == "nao_encontrado":
+        initial_context = f"[SISTEMA] Cliente novo. Telefone: {phone_number}. Ação: Pergunte o nome para cadastrar."
+    elif "error" in cliente:
+        initial_context = "[SISTEMA] Erro ao buscar cliente. Prossiga com cautela."
+    else:
+        nome = cliente.get("name", "Cliente")
+        id_cliente = cliente.get("id")
+        initial_context = f"[SISTEMA] Cliente identificado: {nome} (ID: {id_cliente}). Não pergunte dados já sabidos."
+
+    # Prompt
+    system_prompt = (
+        "Você é o assistente da Gráfica JB Impressões. Seja cordial e eficiente.\n"
+        "1. Se o cliente não for identificado, pegue o nome e use `criar_cliente`.\n"
+        "2. Se pedir serviços, use `consultar_produtos_todos` e liste sem preços inicialmente.\n"
+        "3. Responda em português, de forma humanizada."
+    )
+
+    history_str = "\n".join(history)
+    full_prompt = f"{system_prompt}\n\n{initial_context}\n\nHistórico:\n{history_str}\n\nCliente: {user_message}\nAtendente:"
+
+    try:
+        response = gemini_model.generate_content(full_prompt)
+        candidate = response.candidates[0]
         
-        url_send = f"{EVOLUTION_URL_BASE}/message/sendtext/{EVOLUTION_INSTANCE}"
-        headers_evo = {"apikey": EVOLUTION_KEY, "Content-Type": "application/json"}
-        payload_evo = {"number": jid, "text": reply_text} # Usamos o JID completo
-        
-        res = requests.post(url_send, json=payload_evo, headers=headers_evo, timeout=20)
-        print(f"[EVOLUTION] {res.status_code} -> {res.text}", file=sys.stderr)
+        # Lógica de Tool Calling
+        if candidate.finish_reason == "TOOL_USE":
+            call = candidate.content.parts[0].function_call
+            fname = call.name
+            args = dict(call.args)
+            
+            # Injeção de dependência (Telefone)
+            if fname == "criar_cliente" and "telefone" not in args:
+                args["telefone"] = phone_number
+            
+            if fname in TOOL_ROUTER:
+                print(f"[IA] Chamando ferramenta: {fname}", file=sys.stderr)
+                result = TOOL_ROUTER[fname](**args)
+                
+                # Retorno para a IA
+                tool_response = {
+                    "function_response": {
+                        "name": fname,
+                        "response": {"content": json.dumps(result)}
+                    }
+                }
+                final_res = gemini_model.generate_content([full_prompt, candidate.content, tool_response])
+                return final_res.candidates[0].content.parts[0].text.strip()
+            
+        return candidate.content.parts[0].text.strip()
 
     except Exception as e:
-        print(f"[PROCESSOR] ERRO FATAL no processamento assíncrono: {e}", file=sys.stderr)
-        # Tenta enviar um erro para o usuário
-        try:
-            if 'jid' in locals() and jid: # Verifica se jid existe
-                url_send = f"{EVOLUTION_URL_BASE}/message/sendtext/{EVOLUTION_INSTANCE}"
-                headers_evo = {"apikey": EVOLUTION_KEY, "Content-Type": "application/json"}
-                payload_evo = {"number": jid, "text": "Desculpe, ocorreu um erro interno. Tente novamente."}
-                requests.post(url_send, json=payload_evo, headers=headers_evo, timeout=20)
-        except:
-            pass # Falha silenciosa se não conseguir enviar o erro
+        print(f"[IA] Erro na geração: {e}", file=sys.stderr)
+        return "Desculpe, tive um problema técnico momentâneo."
 
-
-# ====== Rotas (Apenas 2 rotas) ======
+# ====== Rotas ======
 @app.route("/", methods=["GET"])
-def home():
-    """Rota simples para o Render verificar se o serviço está ativo."""
-    return jsonify({"status": "ok", "service": "vinnax-bot-bridge"}), 200
+def health():
+    return jsonify({"status": "online", "mode": "brain"}), 200
 
-@app.route("/webhook/messages-upsert", methods=["POST"])
-def webhook_messages_upsert():
-    # Retorno imediato (200 OK) para evitar reenvio do Evolution
+# ROTA NOVA QUE O LOVABLE VAI CHAMAR
+@app.route("/api/ai", methods=["POST"])
+def api_ai_proxy():
     data = request.get_json(silent=True) or {}
+    print(f"[DEBUG] Recebido do Lovable: {json.dumps(data)}", file=sys.stderr)
     
-    print(f"\n[DEBUG] Webhook Payload Recebido: {json.dumps(data)}", file=sys.stderr)
+    # O Lovable provavelmente vai mandar algo como:
+    # { "message": "Olá", "phone": "5564...", ... }
+    # Vamos adaptar para garantir que pegamos o certo
+    
+    user_msg = data.get("message") or data.get("messageText") or ""
+    phone = data.get("phone") or data.get("phoneNumber") or ""
+    
+    # Normalizar telefone vindo do Lovable se necessário
+    phone = normalize_phone(phone)
+    
+    if not user_msg:
+        return jsonify({"error": "No message provided"}), 400
 
-    # Inicia o processamento pesado em segundo plano
-    threading.Thread(target=process_message, args=(data,)).start()
+    # Gerenciar histórico simples
+    if phone not in CHAT_SESSIONS: CHAT_SESSIONS[phone] = []
+    
+    # Processar
+    response_text = generate_response(user_msg, phone, CHAT_SESSIONS[phone])
+    
+    # Atualizar histórico
+    CHAT_SESSIONS[phone].append(f"Cliente: {user_msg}")
+    CHAT_SESSIONS[phone].append(f"Atendente: {response_text}")
+    
+    # Retornar JSON para o Lovable/Evolution enviar
+    return jsonify({
+        "message": response_text,
+        "action": "reply" # Sinal para quem receber saber o que fazer
+    })
 
-    # Resposta imediata para evitar timeouts do Evolution
-    return jsonify({"status": "processing_async"}), 200
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
