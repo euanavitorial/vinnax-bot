@@ -18,16 +18,17 @@ EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# [CORREÇÃO 2] Voltamos ao nome simples para evitar erro 404
-GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
+# [MUDANÇA CRÍTICA] Usando o modelo "gemini-pro" que é universal e não dá erro 404
+GEMINI_MODEL_NAME = "gemini-pro"
 
-# [CORREÇÃO 1] Novas variáveis para o Supabase
+# --- CONFIGURAÇÃO DO SUPABASE ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
-# Monta a URL da API de clientes automaticamente se tiver a URL base
+# Monta a URL da API de clientes automaticamente
 if SUPABASE_URL:
-    CLIENTE_API_ENDPOINT = f"{SUPABASE_URL}/functions/v1/api-clients"
+    base_url = SUPABASE_URL.rstrip("/")
+    CLIENTE_API_ENDPOINT = f"{base_url}/functions/v1/api-clients"
 else:
     CLIENTE_API_ENDPOINT = os.environ.get("CLIENTE_API_ENDPOINT", "")
 
@@ -50,8 +51,8 @@ def extract_text(message: Dict[str, Any]) -> str:
         if mid in message: return (message[mid].get("caption") or "").strip()
     return ""
 
-# [CORREÇÃO 1] Headers corretos para o Supabase Edge Functions
 def get_auth_headers():
+    """Autenticação correta para Supabase (Bearer Token)"""
     return {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
@@ -60,7 +61,7 @@ def get_auth_headers():
 
 
 # ======================================================================
-# FERRAMENTAS (TOOLS)
+# PASSO 1: FERRAMENTAS (TOOLS)
 # ======================================================================
 TOOLS_MENU = [
     {
@@ -127,7 +128,7 @@ TOOLS_MENU = [
 
 
 # ======================================================================
-# FUNÇÕES DA API
+# PASSO 2: FUNÇÕES DA API
 # ======================================================================
 def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None) -> Dict[str, Any]:
     if not (SUPABASE_SERVICE_ROLE_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
@@ -142,19 +143,17 @@ def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None) -
 def call_api_consultar_cliente_por_id(id_cliente: int) -> Dict[str, Any]:
     if not (SUPABASE_SERVICE_ROLE_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
-        # Aqui assumimos que consultar por ID ainda é GET na rota /id, mas se for POST avisar
         url = f"{CLIENTE_API_ENDPOINT}/{id_cliente}"
         response = requests.get(url, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao consultar cliente: {e}"}
 
-# [CORREÇÃO 3] Alterado para POST enviando o telefone no corpo (JSON)
 def call_api_consultar_cliente_por_telefone(telefone: str) -> Dict[str, Any]:
     if not (SUPABASE_SERVICE_ROLE_KEY and CLIENTE_API_ENDPOINT): 
         return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
-        # Endpoint espera POST com json body
+        # POST para filtrar por telefone
         response = requests.post(
             CLIENTE_API_ENDPOINT,
             headers=get_auth_headers(),
@@ -162,21 +161,14 @@ def call_api_consultar_cliente_por_telefone(telefone: str) -> Dict[str, Any]:
             timeout=20
         )
         response.raise_for_status()
-        
-        # Supabase Edge Function geralmente retorna o objeto direto ou lista
         dados = response.json()
         
-        # Se a API retornar uma lista, pegamos o primeiro. Se retornar objeto direto, usamos ele.
         if isinstance(dados, list):
-            if dados:
-                return dados[0]
-            else:
-                return {"status": "nao_encontrado", "mensagem": f"Nenhum cliente encontrado com o telefone {telefone}."}
-        
+            if dados: return dados[0]
+            else: return {"status": "nao_encontrado", "mensagem": f"Nenhum cliente encontrado com o telefone {telefone}."}
         return dados
-
-    except Exception as e: 
-        return {"status": "erro", "mensagem": f"Erro ao consultar cliente por telefone: {e}"}
+        
+    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao consultar cliente por telefone: {e}"}
 
 def call_api_atualizar_cliente(id_cliente: int, nome: str = None, telefone: str = None, email: str = None) -> Dict[str, Any]:
     if not (SUPABASE_SERVICE_ROLE_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
@@ -199,6 +191,10 @@ def call_api_excluir_cliente(id_cliente: int) -> Dict[str, Any]:
         return response.json()
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao excluir cliente: {e}"}
 
+
+# ======================================================================
+# PASSO 3: O ROTEADOR
+# ======================================================================
 TOOL_ROUTER: Dict[str, Callable[..., Dict[str, Any]]] = {
     "criar_cliente": call_api_criar_cliente,
     "consultar_cliente_por_id": call_api_consultar_cliente_por_id,
@@ -213,16 +209,6 @@ if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         
-        # LOG DE DIAGNÓSTICO (Mantido para segurança)
-        try:
-            app.logger.info("=== LISTA DE MODELOS DISPONÍVEIS ===")
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    app.logger.info(f"Modelo encontrado: {m.name}")
-            app.logger.info("======================================")
-        except Exception:
-            pass
-
         safety_settings = {
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
             HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -230,20 +216,21 @@ if GEMINI_API_KEY:
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
         }
         
+        # Inicializa com o modelo padrão seguro
         gemini_model = genai.GenerativeModel(
             GEMINI_MODEL_NAME,
             safety_settings=safety_settings,
             tools=TOOLS_MENU
         )
-        app.logger.info(f"[GEMINI] Modelo inicializado: {GEMINI_MODEL_NAME}")
+        app.logger.info(f"[GEMINI] Modelo carregado: {GEMINI_MODEL_NAME}")
     except Exception as e:
-        app.logger.exception(f"[GEMINI] Erro Fatal ao inicializar SDK: {e}")
+        app.logger.exception(f"[GEMINI] Erro ao inicializar SDK: {e}")
 else:
     app.logger.warning("[GEMINI] GEMINI_API_KEY não configurada.")
 
 
 # ======================================================================
-# LÓGICA DE RESPOSTA DO BOT
+# LÓGICA DE RESPOSTA
 # ======================================================================
 def answer_with_gemini(user_text: str, chat_history: List[str], initial_context: str = "", client_phone: str = None) -> str:
     if not gemini_model:
@@ -267,9 +254,11 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
             f"=== Nova Mensagem ===\nCliente: {user_text}\nAtendente:"
         )
 
+        # 1. Primeira chamada ao Gemini
         response = gemini_model.generate_content(full_prompt)
         candidate = response.candidates[0]
         
+        # 2. Verificar ferramenta
         part = candidate.content.parts[0]
         if hasattr(part, 'function_call') and part.function_call:
             app.logger.info("[GEMINI] Pedido de 'Tool Use' detectado.")
@@ -278,11 +267,13 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
             tool_name = function_call.name
             tool_args = dict(function_call.args)
             
+            # 3. Usar o ROTEADOR
             if tool_name in TOOL_ROUTER:
                 app.logger.info(f"[ROUTER] Roteando para a função: '{tool_name}'")
                 function_to_call = TOOL_ROUTER[tool_name]
                 api_result = function_to_call(**tool_args)
                 
+                # 4. Segunda chamada
                 tool_response_part = {
                     "function_response": {
                         "name": tool_name,
@@ -344,9 +335,8 @@ def webhook_messages_upsert():
         elif search_result.get("status") == "erro":
              initial_context = f"AVISO: O sistema não pôde buscar clientes devido a um erro na API."
         else:
-            client_name = search_result.get("name") or "Cliente" 
-            # Verificação segura caso o ID venha como string ou int
-            c_id = search_result.get('id') or "Desconhecido"
+            client_name = search_result.get("name") or "Cliente"
+            c_id = search_result.get("id") or "ID Desconhecido"
             initial_context = f"CONTEXTO INICIAL: O número de telefone {client_phone} pertence ao cliente '{client_name}' (ID {c_id}). O bot DEVE usar o nome do cliente na resposta e NÃO DEVE perguntar o telefone novamente."
     
     reply = answer_with_gemini(text, current_history, initial_context, client_phone) 
