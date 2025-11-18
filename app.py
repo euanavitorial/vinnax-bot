@@ -1,235 +1,354 @@
 import os
 import json
-import threading
-import sys
-import re
 from collections import deque
-from typing import Dict, Any, List
+from typing import Any, Dict, List, Callable
 
 from flask import Flask, request, jsonify
 import requests
+
+# --- IMPORTAÇÃO PADRÃO E SEGURA ---
 import google.generativeai as genai
-from google.api_core.exceptions import InvalidArgument
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
+# Não importamos mais FunctionCall explicitamente para evitar erros de versão
+# ----------------------------------
 
-# ====== Configurações ======
-app = Flask(__name__)
-
-# Chaves do Render
+# ====== Config (via variáveis de ambiente) ======
 EVOLUTION_KEY = os.environ.get("EVOLUTION_KEY", "")
 EVOLUTION_URL_BASE = os.environ.get("EVOLUTION_URL_BASE", "")
 EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 
-# Configuração do Gemini
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-# Usando o modelo flash que é mais rápido e barato, ou pro se preferir
-GEMINI_MODEL_NAME = "models/gemini-1.5-flash-latest" 
+GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "models/gemini-1.5-pro-latest")
 
-# Chave do seu Sistema (Lovable/Supabase)
 LOVABLE_API_KEY = os.environ.get("LOVABLE_API_KEY", "") 
+CLIENTE_API_ENDPOINT = os.environ.get("CLIENTE_API_ENDPOINT", "https://ebiitbpdvskreiuoeyaz.supabase.co/functions/v1/api-clients")
+LANCAMENTO_API_ENDPOINT = os.environ.get("LANCAMENTO_API_ENDPOINT", "https://api.seusistema.com/v1/lancamentos")
 
-# Endpoints das suas APIs
-CLIENTE_API_ENDPOINT = "https://ebiitbpdvskreiuoeyaz.supabase.co/functions/v1/api-clients"
-PRODUTO_API_ENDPOINT = "https://ebiitbpdvskreiuoeyaz.supabase.co/functions/v1/api-products"
-OS_API_ENDPOINT = "https://ebiitbpdvskreiuoeyaz.supabase.co/functions/v1/api-service-orders"
-ORCAMENTO_API_ENDPOINT = "https://ebiitbpdvskreiuoeyaz.supabase.co/functions/v1/api-quotes"
+app = Flask(__name__)
 
-# Memória e Controle
+# ====== Memória e Deduplicação ======
 PROCESSED_IDS = deque(maxlen=500)
-CHAT_SESSIONS: Dict[str, List[Dict]] = {} # Histórico compatível com Gemini SDK
-CHAT_HISTORY_LENGTH = 20
+CHAT_SESSIONS: Dict[str, List[str]] = {}
+CHAT_HISTORY_LENGTH = 10
 
-# ====== Inicialização do Gemini ======
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-else:
-    print("ERRO: GEMINI_API_KEY não encontrada.", file=sys.stderr)
 
-# ====== Definição das Ferramentas (Tools) ======
-# Definindo as ferramentas de forma que o SDK entenda nativamente
-tools_lista = [
-    # CLIENTE
-    {"name": "criar_cliente", "description": "Cadastra cliente novo. O telefone é inserido automaticamente pelo sistema.", "parameters": {"type": "OBJECT", "properties": {"nome": {"type": "STRING"}, "email": {"type": "STRING"}}, "required": ["nome"]}},
-    {"name": "consultar_cliente_por_telefone", "description": "Verifica se o cliente já tem cadastro pelo telefone.", "parameters": {"type": "OBJECT", "properties": {"telefone": {"type": "STRING"}}, "required": ["telefone"]}},
-    # PRODUTO
-    {"name": "consultar_produtos_todos", "description": "Lista todos os produtos e serviços disponíveis na gráfica.", "parameters": {"type": "OBJECT", "properties": {}}},
+# ====== Utilidades WhatsApp (MOVIDO PARA O TOPO) ======
+def extract_text(message: Dict[str, Any]) -> str:
+    """Extrai o texto de diversos tipos de mensagem do WhatsApp."""
+    if not isinstance(message, dict): return ""
+    if "conversation" in message: return (message.get("conversation") or "").strip()
+    if "extendedTextMessage" in message: return (message["extendedTextMessage"].get("text") or "").strip()
+    for mid in ("imageMessage", "videoMessage", "documentMessage", "audioMessage"):
+        if mid in message: return (message[mid].get("caption") or "").strip()
+    return ""
+
+def get_auth_headers():
+    """Retorna o cabeçalho de autenticação para as APIs do Lovable."""
+    return {
+        "x-api-key": LOVABLE_API_KEY,
+        "Content-Type": "application/json"
+    }
+
+
+# ======================================================================
+# PASSO 1: O "MENU" DE FERRAMENTAS PARA O GEMINI
+# ======================================================================
+TOOLS_MENU = [
+    {
+        "name": "criar_cliente",
+        "description": "Cadastra um novo cliente no sistema. Requer nome e pelo menos telefone ou email.",
+        "parameters": {
+            "type_": "OBJECT",
+            "properties": {
+                "nome": {"type": "STRING", "description": "Nome completo do cliente."},
+                "telefone": {"type": "STRING", "description": "Número de telefone do cliente (opcional)."},
+                "email": {"type": "STRING", "description": "Endereço de email do cliente (opcional)."}
+            },
+            "required": ["nome"]
+        }
+    },
+    {
+        "name": "consultar_cliente_por_id",
+        "description": "Busca os detalhes de um cliente (telefone, email, etc.) usando o ID do cliente.",
+        "parameters": {
+            "type_": "OBJECT",
+            "properties": {
+                "id_cliente": {"type": "INTEGER", "description": "O ID (identificador) numérico do cliente."}
+            },
+            "required": ["id_cliente"]
+        }
+    },
+    {
+        "name": "consultar_cliente_por_telefone",
+        "description": "Busca os detalhes de um cliente usando o número de telefone. Use para verificar se um novo cliente já está cadastrado.",
+        "parameters": {
+            "type_": "OBJECT",
+            "properties": {
+                "telefone": {"type": "STRING", "description": "O número de telefone do cliente, incluindo o código do país (ex: 5511999999999)."}
+            },
+            "required": ["telefone"]
+        }
+    },
+    {
+        "name": "atualizar_cliente",
+        "description": "Modifica informações de um cliente existente usando o ID do cliente. Use apenas os campos a serem alterados.",
+        "parameters": {
+            "type_": "OBJECT",
+            "properties": {
+                "id_cliente": {"type": "INTEGER", "description": "O ID (identificador) numérico do cliente a ser atualizado."},
+                "nome": {"type": "STRING", "description": "Novo nome do cliente (opcional)."},
+                "telefone": {"type": "STRING", "description": "Novo telefone do cliente (opcional)."},
+                "email": {"type": "STRING", "description": "Novo email do cliente (opcional)."}
+            },
+            "required": ["id_cliente"]
+        }
+    },
+    {
+        "name": "excluir_cliente",
+        "description": "Deleta permanentemente um cliente do sistema usando o ID do cliente.",
+        "parameters": {
+            "type_": "OBJECT",
+            "properties": {
+                "id_cliente": {"type": "INTEGER", "description": "O ID (identificador) numérico do cliente a ser excluído."}
+            },
+            "required": ["id_cliente"]
+        }
+    }
 ]
 
-# ====== Funções Utilitárias ======
-def get_headers():
-    return {"x-api-key": LOVABLE_API_KEY, "Content-Type": "application/json"}
 
-def normalize_phone(phone: str) -> str:
-    """Remove caracteres e formata o telefone."""
-    if not phone: return ""
-    p = str(phone).replace("@s.whatsapp.net", "").strip()
-    if p.startswith("55"): p = p[2:]
-    # Remove o 9 extra ou 0 de operadora se necessário (lógica simplificada)
-    if len(p) > 11 and p.startswith("0"): p = p[1:]
-    return p
+# ======================================================================
+# PASSO 2: AS FUNÇÕES REAIS DA API (ACIMA DO ROUTER)
+# ======================================================================
 
-# ====== Funções de API (Ação Real) ======
-def api_criar_cliente(nome, email=None, telefone=None):
+# --- FUNÇÕES DE CLIENTE ---
+def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None) -> Dict[str, Any]:
+    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
-        if not telefone: return {"erro": "Telefone obrigatório"}
-        payload = {"name": nome, "phone": normalize_phone(telefone), "email": email}
-        res = requests.post(CLIENTE_API_ENDPOINT, json=payload, headers=get_headers(), timeout=10)
-        res.raise_for_status()
-        return res.json()
-    except Exception as e: return {"erro": str(e)}
+        payload = {"name": nome, "phone": telefone, "email": email}
+        payload = {k: v for k, v in payload.items() if v is not None} 
+        response = requests.post(CLIENTE_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=20)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao criar cliente: {e}"}
 
-def api_consultar_cliente(telefone):
+def call_api_consultar_cliente_por_id(id_cliente: int) -> Dict[str, Any]:
+    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
-        tel_norm = normalize_phone(telefone)
-        res = requests.get(CLIENTE_API_ENDPOINT, headers=get_headers(), timeout=10)
-        res.raise_for_status()
-        clientes = res.json()
-        # Filtro manual simples
-        for c in clientes:
-            if normalize_phone(c.get("phone", "")) == tel_norm:
-                return c
-        return {"status": "nao_encontrado"}
-    except Exception as e: return {"erro": str(e)}
+        url = f"{CLIENTE_API_ENDPOINT}/{id_cliente}"
+        response = requests.get(url, headers=get_auth_headers(), timeout=20)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao consultar cliente: {e}"}
 
-def api_listar_produtos():
+def call_api_consultar_cliente_por_telefone(telefone: str) -> Dict[str, Any]:
+    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
-        res = requests.get(PRODUTO_API_ENDPOINT, headers=get_headers(), timeout=10)
-        res.raise_for_status()
-        return res.json()
-    except Exception as e: return {"erro": str(e)}
+        response = requests.get(CLIENTE_API_ENDPOINT, headers=get_auth_headers(), timeout=20)
+        response.raise_for_status()
+        clientes = response.json() 
+        cliente_encontrado = [c for c in clientes if c.get('phone') == telefone]
+        if cliente_encontrado:
+            return cliente_encontrado[0] 
+        else:
+            return {"status": "nao_encontrado", "mensagem": f"Nenhum cliente encontrado com o telefone {telefone}."}
+    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao consultar cliente por telefone: {e}"}
 
-# Mapa de funções para execução
-FUNCTION_MAP = {
-    "criar_cliente": api_criar_cliente,
-    "consultar_cliente_por_telefone": api_consultar_cliente,
-    "consultar_produtos_todos": api_listar_produtos
+def call_api_atualizar_cliente(id_cliente: int, nome: str = None, telefone: str = None, email: str = None) -> Dict[str, Any]:
+    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
+    try:
+        url = f"{CLIENTE_API_ENDPOINT}/{id_cliente}"
+        payload = {"name": nome, "phone": telefone, "email": email}
+        payload = {k: v for k, v in payload.items() if v is not None}
+        response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao atualizar cliente: {e}"}
+
+def call_api_excluir_cliente(id_cliente: int) -> Dict[str, Any]:
+    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
+    try:
+        url = f"{CLIENTE_API_ENDPOINT}/{id_cliente}"
+        response = requests.delete(url, headers=get_auth_headers(), timeout=20)
+        response.raise_for_status()
+        if response.status_code == 204: return {"status": "sucesso", "mensagem": f"Cliente ID {id_cliente} excluído com sucesso."}
+        return response.json()
+    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao excluir cliente: {e}"}
+
+
+# ======================================================================
+# PASSO 3: O "ROTEADOR" (MAPA DE FERRAMENTAS)
+# ======================================================================
+TOOL_ROUTER: Dict[str, Callable[..., Dict[str, Any]]] = {
+    "criar_cliente": call_api_criar_cliente,
+    "consultar_cliente_por_id": call_api_consultar_cliente_por_id,
+    "consultar_cliente_por_telefone": call_api_consultar_cliente_por_telefone,
+    "atualizar_cliente": call_api_atualizar_cliente,
+    "excluir_cliente": call_api_excluir_cliente,
 }
 
-# ====== Lógica do Chat ======
-def chat_with_gemini(user_text, jid_completo):
+# ====== Inicialização do Gemini (AGORA USANDO A SINTAXE PADRÃO) ======
+gemini_model = None
+if GEMINI_API_KEY:
     try:
-        # 1. Prepara o histórico
-        if jid_completo not in CHAT_SESSIONS:
-            CHAT_SESSIONS[jid_completo] = []
+        genai.configure(api_key=GEMINI_API_KEY)
+        safety_settings = {h: HarmBlockThreshold.BLOCK_NONE for h in HarmCategory}
         
-        # 2. Cria o modelo com as ferramentas
-        model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL_NAME,
-            tools=tools_lista
-            # REMOVIDO SAFETY_SETTINGS para evitar erro 400
+        # Sintaxe padrão que funciona na v0.7.0
+        gemini_model = genai.GenerativeModel(
+            GEMINI_MODEL_NAME,
+            safety_settings=safety_settings,
+            tools=TOOLS_MENU
+        )
+        app.logger.info(f"[GEMINI] Modelo carregado com {len(TOOLS_MENU)} ferramentas.")
+    except Exception as e:
+        app.logger.exception(f"[GEMINI] Erro ao inicializar SDK: {e}")
+else:
+    app.logger.warning("[GEMINI] GEMINI_API_KEY não configurada.")
+
+
+# ======================================================================
+# LÓGICA DE RESPOSTA DO BOT
+# ======================================================================
+def answer_with_gemini(user_text: str, chat_history: List[str], initial_context: str = "") -> str:
+    if not gemini_model:
+        return f"Olá! Recebi sua mensagem: {user_text}"
+
+    try:
+        system_prompt = (
+            "Você é um assistente da Vinnax Beauty. Seu objetivo é ser simpático, "
+            "profissional e ajudar o cliente. Se for o início da conversa, "
+            "cumprimente, se apresente e comece a conversa. Se o cliente já foi identificado no "
+            "CONTEXTO INICIAL, use o nome dele. Responda em português, de forma breve. "
+            "**FERRAMENTAS:** Use as ferramentas disponíveis (`tools`) sempre que o cliente solicitar uma ação (criar, consultar, excluir). "
+            "Sempre confirme os dados críticos antes de executar uma ação."
         )
         
-        # 3. Inicia o chat com histórico
-        chat = model.start_chat(history=CHAT_SESSIONS[jid_completo])
-        
-        # 4. Envia mensagem do usuário
-        # Adicionamos um contexto oculto sobre quem é o usuário
-        telefone_usuario = normalize_phone(jid_completo)
-        
-        # Prompt do sistema injetado na mensagem (técnica segura)
-        prompt_sistema = (
-            f"[SISTEMA: O usuário tem o telefone {telefone_usuario}. "
-            "Você é o assistente da Gráfica JB. "
-            "Se o usuário disser o nome e não tiver cadastro, use a ferramenta `criar_cliente` imediatamente. "
-            "O telefone será injetado automaticamente pela ferramenta, não peça o telefone.] "
-            f"{user_text}"
+        history_string = "\n".join(chat_history)
+        full_prompt = (
+            f"{system_prompt}\n\n"
+            f"{initial_context}\n"
+            f"=== Histórico da Conversa ===\n{history_string}\n"
+            f"=== Nova Mensagem ===\nCliente: {user_text}\nAtendente:"
         )
+
+        # 1. Primeira chamada ao Gemini
+        response = gemini_model.generate_content(full_prompt)
+        candidate = response.candidates[0]
         
-        response = chat.send_message(prompt_sistema)
-        
-        # 5. Verifica se a IA quer usar uma ferramenta (Function Call)
-        # O SDK novo facilita isso. Ele processa a chamada automaticamente se configurado,
-        # mas aqui vamos fazer manualmente para garantir a injeção do telefone.
-        
-        part = response.candidates[0].content.parts[0]
-        
-        if part.function_call:
-            fname = part.function_call.name
-            fargs = dict(part.function_call.args)
+        # 2. Verificar se o Gemini pediu para usar uma ferramenta
+        # Usamos a verificação segura que funciona em várias versões
+        part = candidate.content.parts[0]
+        if hasattr(part, 'function_call') and part.function_call:
+            app.logger.info("[GEMINI] Pedido de 'Tool Use' detectado.")
             
-            print(f"[IA] Chamando ferramenta: {fname}", file=sys.stderr)
+            function_call = part.function_call
+            tool_name = function_call.name
+            # Converte os argumentos para dicionário Python padrão
+            tool_args = dict(function_call.args)
             
-            # INJEÇÃO AUTOMÁTICA DE TELEFONE
-            if fname in ["criar_cliente", "consultar_cliente_por_telefone"]:
-                fargs["telefone"] = jid_completo # Passamos o JID, a função normaliza
-            
-            # Executa a função
-            if fname in FUNCTION_MAP:
-                api_result = FUNCTION_MAP[fname](**fargs)
+            # 3. Usar o ROTEADOR
+            if tool_name in TOOL_ROUTER:
+                app.logger.info(f"[ROUTER] Roteando para a função: '{tool_name}'")
                 
-                # Devolve o resultado para a IA gerar a resposta final
-                # Na versão nova do SDK, enviamos o resultado como uma ToolResponse
-                response = chat.send_message(
-                    genai.protos.Content(
-                        parts=[genai.protos.Part(
-                            function_response=genai.protos.FunctionResponse(
-                                name=fname,
-                                response={"result": api_result}
-                            )
-                        )]
-                    )
+                function_to_call = TOOL_ROUTER[tool_name]
+                api_result = function_to_call(**tool_args)
+                
+                # 4. Segunda chamada ao Gemini (com o resultado da API)
+                # Formato compatível com v0.7.0+
+                tool_response_part = {
+                    "function_response": {
+                        "name": tool_name,
+                        "response": {"content": json.dumps(api_result)}
+                    }
+                }
+
+                response_final = gemini_model.generate_content(
+                    [full_prompt, candidate.content, tool_response_part]
                 )
-        
-        # 6. Pega o texto final
-        resposta_final = response.text
-        
-        # Atualiza histórico local (limite de segurança)
-        if len(CHAT_SESSIONS[jid_completo]) > 20:
-            CHAT_SESSIONS[jid_completo] = CHAT_SESSIONS[jid_completo][-10:]
+                txt = response_final.candidates[0].content.parts[0].text
             
-        return resposta_final
+            else:
+                app.logger.warning(f"[ROUTER] Ferramenta '{tool_name}' não encontrada no roteador.")
+                txt = "Desculpe, tentei usar uma ferramenta que não conheço."
+        
+        else:
+            txt = part.text
 
+        if not txt:
+            return "Poderia repetir, por favor?"
+        return txt.strip()
+        
     except Exception as e:
-        print(f"[IA ERRO] {e}", file=sys.stderr)
-        return "Desculpe, tive um erro técnico rápido. Pode repetir?"
+        app.logger.exception(f"[GEMINI] Erro geral ao gerar resposta: {e}")
+        return "Desculpe, tive um problema para processar sua solicitação."
 
-# ====== Processamento do Webhook ======
-def process_webhook_data(data):
-    try:
-        # Extração segura de dados
-        msg = data.get("data", {}).get("message", {})
-        if not msg: return
-        
-        remote_jid = data.get("data", {}).get("key", {}).get("remoteJid", "")
-        if not remote_jid or "status@broadcast" in remote_jid: return
-        
-        # Extrair texto
-        user_text = (msg.get("conversation") or 
-                     msg.get("extendedTextMessage", {}).get("text") or "").strip()
-        
-        if not user_text: return
-        
-        print(f"[MSG] Recebido de {remote_jid}: {user_text}", file=sys.stderr)
-        
-        # Chamar IA
-        resposta = chat_with_gemini(user_text, remote_jid)
-        
-        # Enviar Resposta
-        if EVOLUTION_URL_BASE and EVOLUTION_KEY:
-            url = f"{EVOLUTION_URL_BASE}/message/sendtext/{EVOLUTION_INSTANCE}"
-            payload = {"number": remote_jid, "text": resposta}
-            headers = {"apikey": EVOLUTION_KEY, "Content-Type": "application/json"}
-            requests.post(url, json=payload, headers=headers)
-            print("[MSG] Resposta enviada.", file=sys.stderr)
-
-    except Exception as e:
-        print(f"[THREAD ERRO] {e}", file=sys.stderr)
+# ====== Rotas (MANTIDAS IGUAIS) ======
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({"status": "ok", "service": "vinnax-bot"}), 200
 
 @app.route("/webhook/messages-upsert", methods=["POST"])
-def webhook():
-    # Responde rápido para não travar o WhatsApp
-    data = request.get_json(silent=True) or {}
+def webhook_messages_upsert():
+    # ... (O MESMO CÓDIGO DE ANTES) ...
+    raw = request.get_json(silent=True) or {}
+    envelope = raw.get("data", raw)
+    if isinstance(envelope, list) and envelope: envelope = envelope[0]
+    if not isinstance(envelope, dict): return jsonify({"status": "bad_payload"}), 200
+    key = envelope.get("key", {}) or {}
+    if key.get("fromMe") is True: return jsonify({"status": "own_message_ignored"}), 200
+    message = envelope.get("message", {}) or {}
+    if not message: return jsonify({"status": "no_message_ignored"}), 200
+    msg_id = key.get("id") or envelope.get("idMessage") or ""
+    if msg_id:
+        if msg_id in PROCESSED_IDS: return jsonify({"status": "duplicate_ignored"}), 200
+        PROCESSED_IDS.append(msg_id)
     
-    # Filtra mensagens enviadas por mim mesmo
-    if data.get("data", {}).get("key", {}).get("fromMe"):
-        return jsonify({"status": "ignored"}), 200
+    # 1. Extração do Telefone (JID)
+    jid = (key.get("remoteJid") or envelope.get("participant") or "").strip()
+    if not jid.endswith("@s.whatsapp.net"): return jsonify({"status": "non_user_ignored"}), 200
+    client_phone = jid.replace("@s.whatsapp.net", "") 
+    
+    number = client_phone 
+    text = extract_text(message).strip()
+    if not text: return jsonify({"status": "no_text_ignored"}), 200
+    if number not in CHAT_SESSIONS: CHAT_SESSIONS[number] = []
+    current_history = CHAT_SESSIONS[number]
+    
+    # 2. Busca Automática de Cliente (Contexto Inicial)
+    initial_context = ""
+    if not current_history: 
+        search_result = call_api_consultar_cliente_por_telefone(client_phone)
+        
+        if search_result.get("status") == "nao_encontrado":
+            initial_context = f"AVISO: O sistema não encontrou nenhum cliente associado ao telefone {client_phone}. Peça o nome para cadastrar."
+        elif search_result.get("status") == "erro":
+             initial_context = f"AVISO: O sistema não pôde buscar clientes devido a um erro na API."
+        else:
+            client_name = search_result.get("name") or "Cliente" 
+            initial_context = f"CONTEXTO INICIAL: O número de telefone {client_phone} pertence ao cliente '{client_name}' (ID {search_result.get('id')}). O bot DEVE usar o nome do cliente na resposta e NÃO DEVE perguntar o telefone novamente."
+    
+    # 3. Geração da Resposta
+    reply = answer_with_gemini(text, current_history, initial_context, client_phone) # Passando client_phone
+    
+    # 4. Salvamento da Memória
+    CHAT_SESSIONS[number].append(f"Cliente: {text}")
+    CHAT_SESSIONS[number].append(f"Atendente: {reply}")
+    while len(CHAT_SESSIONS[number]) > CHAT_HISTORY_LENGTH:
+        CHAT_SESSIONS[number].pop(0)
 
-    # Inicia thread
-    threading.Thread(target=process_webhook_data, args=(data,)).start()
-    return jsonify({"status": "queued"}), 200
-
-@app.route("/", methods=["GET"])
-def health():
-    return "Bot Online", 200
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    # 5. Envio via Evolution API
+    if not (EVOLUTION_KEY and EVOLUTION_URL_BASE and EVOLUTION_INSTANCE):
+        app.logger.warning("[EVOLUTION] Variáveis de ambiente ausentes.")
+        return jsonify({"status": "missing_env"}), 200
+    
+    try:
+        url_send = f"{EVOLUTION_URL_BASE}/message/sendtext/{EVOLUTION_INSTANCE}"
+        headers = {"apikey": EVOLUTION_KEY, "Content-Type": "application/json"}
+        payload = {"number": number, "text": reply}
+        res = requests.post(url_send, json=payload, headers=headers, timeout=20)
+        app.logger.info(f"[EVOLUTION] {res.status_code} -> {res.text}")
+    except Exception as e:
+        app.logger.exception(f"[EVOLUTION] Erro ao enviar: {e}")
+    return jsonify({"status": "ok"}), 200
+    
