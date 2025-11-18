@@ -9,7 +9,6 @@ import requests
 # --- IMPORTAÇÃO PADRÃO E SEGURA ---
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
-# Não importamos mais FunctionCall explicitamente para evitar erros de versão
 # ----------------------------------
 
 # ====== Config (via variáveis de ambiente) ======
@@ -32,7 +31,7 @@ CHAT_SESSIONS: Dict[str, List[str]] = {}
 CHAT_HISTORY_LENGTH = 10
 
 
-# ====== Utilidades WhatsApp (MOVIDO PARA O TOPO) ======
+# ====== Utilidades WhatsApp ======
 def extract_text(message: Dict[str, Any]) -> str:
     """Extrai o texto de diversos tipos de mensagem do WhatsApp."""
     if not isinstance(message, dict): return ""
@@ -187,14 +186,21 @@ TOOL_ROUTER: Dict[str, Callable[..., Dict[str, Any]]] = {
     "excluir_cliente": call_api_excluir_cliente,
 }
 
-# ====== Inicialização do Gemini (AGORA USANDO A SINTAXE PADRÃO) ======
+# ====== Inicialização do Gemini (CORRIGIDA AQUI) ======
 gemini_model = None
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        safety_settings = {h: HarmBlockThreshold.BLOCK_NONE for h in HarmCategory}
         
-        # Sintaxe padrão que funciona na v0.7.0
+        # CORREÇÃO: Definindo explicitamente as 4 categorias principais
+        # para evitar erros com categorias novas ou não suportadas (Erro 400).
+        safety_settings = {
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+        }
+        
         gemini_model = genai.GenerativeModel(
             GEMINI_MODEL_NAME,
             safety_settings=safety_settings,
@@ -208,7 +214,7 @@ else:
 
 
 # ======================================================================
-# LÓGICA DE RESPOSTA DO BOT (CORRIGIDA PARA ACEITAR client_phone)
+# LÓGICA DE RESPOSTA DO BOT
 # ======================================================================
 def answer_with_gemini(user_text: str, chat_history: List[str], initial_context: str = "", client_phone: str = None) -> str:
     if not gemini_model:
@@ -237,14 +243,12 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
         candidate = response.candidates[0]
         
         # 2. Verificar se o Gemini pediu para usar uma ferramenta
-        # Usamos a verificação segura que funciona em várias versões
         part = candidate.content.parts[0]
         if hasattr(part, 'function_call') and part.function_call:
             app.logger.info("[GEMINI] Pedido de 'Tool Use' detectado.")
             
             function_call = part.function_call
             tool_name = function_call.name
-            # Converte os argumentos para dicionário Python padrão
             tool_args = dict(function_call.args)
             
             # 3. Usar o ROTEADOR
@@ -255,7 +259,6 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
                 api_result = function_to_call(**tool_args)
                 
                 # 4. Segunda chamada ao Gemini (com o resultado da API)
-                # Formato compatível com v0.7.0+
                 tool_response_part = {
                     "function_response": {
                         "name": tool_name,
@@ -283,7 +286,7 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
         app.logger.exception(f"[GEMINI] Erro geral ao gerar resposta: {e}")
         return "Desculpe, tive um problema para processar sua solicitação."
 
-# ====== Rotas (MANTIDAS IGUAIS) ======
+# ====== Rotas ======
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"status": "ok", "service": "vinnax-bot"}), 200
@@ -328,7 +331,6 @@ def webhook_messages_upsert():
             initial_context = f"CONTEXTO INICIAL: O número de telefone {client_phone} pertence ao cliente '{client_name}' (ID {search_result.get('id')}). O bot DEVE usar o nome do cliente na resposta e NÃO DEVE perguntar o telefone novamente."
     
     # 3. Geração da Resposta
-    # AQUI ESTAVA O ERRO: Agora a função aceita o client_phone
     reply = answer_with_gemini(text, current_history, initial_context, client_phone) 
     
     # 4. Salvamento da Memória
