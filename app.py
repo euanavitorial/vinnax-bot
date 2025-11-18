@@ -2,25 +2,24 @@ import os
 import json
 from collections import deque
 from typing import Any, Dict, List, Callable
-
 from flask import Flask, request, jsonify
 import requests
-
-# --- IMPORTAÇÃO PADRÃO ---
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
-# -------------------------
 
-# ====== CONFIG ======
+# ============================================================
+# CONFIGURAÇÕES GERAIS
+# ============================================================
+
 EVOLUTION_KEY = os.environ.get("EVOLUTION_KEY", "")
 EVOLUTION_URL_BASE = os.environ.get("EVOLUTION_URL_BASE", "")
 EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# 🧠 Novo modelo (estável e suportado)
+# Modelo estável e compatível com a versão atual da API
 GEMINI_MODEL_NAME = "models/gemini-2.5-flash"
 
-# --- SUPABASE ---
+# Configuração Supabase (opcional)
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
@@ -32,14 +31,20 @@ else:
 
 app = Flask(__name__)
 
-# ====== MEMÓRIA ======
+# ============================================================
+# MEMÓRIA DE CONVERSA
+# ============================================================
 PROCESSED_IDS = deque(maxlen=500)
 CHAT_SESSIONS: Dict[str, List[str]] = {}
 CHAT_HISTORY_LENGTH = 10
 
 
-# ====== FUNÇÕES AUXILIARES ======
+# ============================================================
+# FUNÇÕES AUXILIARES
+# ============================================================
+
 def extract_text(message: Dict[str, Any]) -> str:
+    """Extrai texto de mensagens do WhatsApp"""
     if not isinstance(message, dict):
         return ""
     if "conversation" in message:
@@ -60,7 +65,10 @@ def get_auth_headers():
     }
 
 
-# ====== SUPABASE TOOLS ======
+# ============================================================
+# SUPABASE TOOL (exemplo)
+# ============================================================
+
 def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None):
     if not (SUPABASE_SERVICE_ROLE_KEY and CLIENTE_API_ENDPOINT):
         return {"status": "erro", "mensagem": "API não configurada."}
@@ -74,7 +82,10 @@ def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None):
         return {"status": "erro", "mensagem": str(e)}
 
 
-# ====== FERRAMENTAS DISPONÍVEIS ======
+# ============================================================
+# TOOLS (GEMINI)
+# ============================================================
+
 TOOLS_MENU = [
     {
         "name": "criar_cliente",
@@ -96,7 +107,10 @@ TOOL_ROUTER = {
 }
 
 
-# ====== GEMINI CONFIG ======
+# ============================================================
+# GEMINI CONFIG
+# ============================================================
+
 gemini_model = None
 if GEMINI_API_KEY:
     try:
@@ -126,7 +140,10 @@ else:
     app.logger.warning("[GEMINI] GEMINI_API_KEY não configurada.")
 
 
-# ====== RESPOSTAS ======
+# ============================================================
+# FUNÇÃO DE RESPOSTA
+# ============================================================
+
 def answer_with_gemini(user_text: str, chat_history: List[str]):
     if not gemini_model:
         return "Olá! Sistema iniciado com sucesso."
@@ -145,7 +162,10 @@ def answer_with_gemini(user_text: str, chat_history: List[str]):
         return f"Erro interno: {e}"
 
 
-# ====== ROTAS ======
+# ============================================================
+# ROTAS
+# ============================================================
+
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"service": "vinnax-bot", "status": "ok"}), 200
@@ -157,11 +177,63 @@ def test_ai():
     question = data.get("question", "")
     if not question:
         return jsonify({"error": "Envie o campo 'question' no body JSON"}), 400
-
     reply = answer_with_gemini(question, [])
     return jsonify({"reply": reply}), 200
 
 
-# ====== EXECUÇÃO LOCAL ======
+@app.route("/webhook/messages-upsert", methods=["POST"])
+def webhook_messages_upsert():
+    raw = request.get_json(silent=True) or {}
+    envelope = raw.get("data", raw)
+
+    if isinstance(envelope, list) and envelope:
+        envelope = envelope[0]
+    if not isinstance(envelope, dict):
+        return jsonify({"status": "bad_payload"}), 200
+
+    key = envelope.get("key", {}) or {}
+    if key.get("fromMe"):
+        return jsonify({"status": "own_message_ignored"}), 200
+
+    message = envelope.get("message", {}) or {}
+    if not message:
+        return jsonify({"status": "no_message_ignored"}), 200
+
+    jid = (key.get("remoteJid") or envelope.get("participant") or "").strip()
+    if not jid.endswith("@s.whatsapp.net"):
+        return jsonify({"status": "non_user_ignored"}), 200
+    client_phone = jid.replace("@s.whatsapp.net", "")
+
+    text = extract_text(message).strip()
+    if not text:
+        return jsonify({"status": "no_text_ignored"}), 200
+
+    if client_phone not in CHAT_SESSIONS:
+        CHAT_SESSIONS[client_phone] = []
+    history = CHAT_SESSIONS[client_phone]
+
+    reply = answer_with_gemini(text, history)
+
+    history.append(f"Cliente: {text}")
+    history.append(f"Atendente: {reply}")
+    while len(history) > CHAT_HISTORY_LENGTH:
+        history.pop(0)
+
+    if EVOLUTION_KEY and EVOLUTION_URL_BASE and EVOLUTION_INSTANCE:
+        try:
+            url_send = f"{EVOLUTION_URL_BASE}/message/sendtext/{EVOLUTION_INSTANCE}"
+            headers = {"apikey": EVOLUTION_KEY, "Content-Type": "application/json"}
+            payload = {"number": client_phone, "text": reply}
+            requests.post(url_send, json=payload, headers=headers, timeout=20)
+        except Exception as e:
+            app.logger.exception(f"[EVOLUTION] Erro ao enviar mensagem: {e}")
+
+    return jsonify({"status": "ok"}), 200
+
+
+# ============================================================
+# EXECUÇÃO LOCAL
+# ============================================================
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
