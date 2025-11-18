@@ -18,11 +18,19 @@ EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# Vamos tentar o nome padrão novamente. Se falhar, o diagnóstico nos dirá o nome certo.
+# [CORREÇÃO 2] Voltamos ao nome simples para evitar erro 404
 GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
 
-LOVABLE_API_KEY = os.environ.get("LOVABLE_API_KEY", "") 
-CLIENTE_API_ENDPOINT = os.environ.get("CLIENTE_API_ENDPOINT", "https://ebiitbpdvskreiuoeyaz.supabase.co/functions/v1/api-clients")
+# [CORREÇÃO 1] Novas variáveis para o Supabase
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+
+# Monta a URL da API de clientes automaticamente se tiver a URL base
+if SUPABASE_URL:
+    CLIENTE_API_ENDPOINT = f"{SUPABASE_URL}/functions/v1/api-clients"
+else:
+    CLIENTE_API_ENDPOINT = os.environ.get("CLIENTE_API_ENDPOINT", "")
+
 LANCAMENTO_API_ENDPOINT = os.environ.get("LANCAMENTO_API_ENDPOINT", "https://api.seusistema.com/v1/lancamentos")
 
 app = Flask(__name__)
@@ -42,9 +50,11 @@ def extract_text(message: Dict[str, Any]) -> str:
         if mid in message: return (message[mid].get("caption") or "").strip()
     return ""
 
+# [CORREÇÃO 1] Headers corretos para o Supabase Edge Functions
 def get_auth_headers():
     return {
-        "x-api-key": LOVABLE_API_KEY,
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
         "Content-Type": "application/json"
     }
 
@@ -120,7 +130,7 @@ TOOLS_MENU = [
 # FUNÇÕES DA API
 # ======================================================================
 def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None) -> Dict[str, Any]:
-    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
+    if not (SUPABASE_SERVICE_ROLE_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
         payload = {"name": nome, "phone": telefone, "email": email}
         payload = {k: v for k, v in payload.items() if v is not None} 
@@ -130,29 +140,46 @@ def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None) -
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao criar cliente: {e}"}
 
 def call_api_consultar_cliente_por_id(id_cliente: int) -> Dict[str, Any]:
-    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
+    if not (SUPABASE_SERVICE_ROLE_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
+        # Aqui assumimos que consultar por ID ainda é GET na rota /id, mas se for POST avisar
         url = f"{CLIENTE_API_ENDPOINT}/{id_cliente}"
         response = requests.get(url, headers=get_auth_headers(), timeout=20)
         response.raise_for_status()
         return response.json()
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao consultar cliente: {e}"}
 
+# [CORREÇÃO 3] Alterado para POST enviando o telefone no corpo (JSON)
 def call_api_consultar_cliente_por_telefone(telefone: str) -> Dict[str, Any]:
-    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
+    if not (SUPABASE_SERVICE_ROLE_KEY and CLIENTE_API_ENDPOINT): 
+        return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
-        response = requests.get(CLIENTE_API_ENDPOINT, headers=get_auth_headers(), timeout=20)
+        # Endpoint espera POST com json body
+        response = requests.post(
+            CLIENTE_API_ENDPOINT,
+            headers=get_auth_headers(),
+            json={"phone": telefone},
+            timeout=20
+        )
         response.raise_for_status()
-        clientes = response.json() 
-        cliente_encontrado = [c for c in clientes if c.get('phone') == telefone]
-        if cliente_encontrado:
-            return cliente_encontrado[0] 
-        else:
-            return {"status": "nao_encontrado", "mensagem": f"Nenhum cliente encontrado com o telefone {telefone}."}
-    except Exception as e: return {"status": "erro", "mensagem": f"Erro ao consultar cliente por telefone: {e}"}
+        
+        # Supabase Edge Function geralmente retorna o objeto direto ou lista
+        dados = response.json()
+        
+        # Se a API retornar uma lista, pegamos o primeiro. Se retornar objeto direto, usamos ele.
+        if isinstance(dados, list):
+            if dados:
+                return dados[0]
+            else:
+                return {"status": "nao_encontrado", "mensagem": f"Nenhum cliente encontrado com o telefone {telefone}."}
+        
+        return dados
+
+    except Exception as e: 
+        return {"status": "erro", "mensagem": f"Erro ao consultar cliente por telefone: {e}"}
 
 def call_api_atualizar_cliente(id_cliente: int, nome: str = None, telefone: str = None, email: str = None) -> Dict[str, Any]:
-    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
+    if not (SUPABASE_SERVICE_ROLE_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
         url = f"{CLIENTE_API_ENDPOINT}/{id_cliente}"
         payload = {"name": nome, "phone": telefone, "email": email}
@@ -163,7 +190,7 @@ def call_api_atualizar_cliente(id_cliente: int, nome: str = None, telefone: str 
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao atualizar cliente: {e}"}
 
 def call_api_excluir_cliente(id_cliente: int) -> Dict[str, Any]:
-    if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
+    if not (SUPABASE_SERVICE_ROLE_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
         url = f"{CLIENTE_API_ENDPOINT}/{id_cliente}"
         response = requests.delete(url, headers=get_auth_headers(), timeout=20)
@@ -180,23 +207,21 @@ TOOL_ROUTER: Dict[str, Callable[..., Dict[str, Any]]] = {
     "excluir_cliente": call_api_excluir_cliente,
 }
 
-# ====== Inicialização do Gemini e DIAGNÓSTICO ======
+# ====== Inicialização do Gemini ======
 gemini_model = None
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         
-        # --- BLOCO DE DIAGNÓSTICO DE MODELOS ---
-        # Isso vai imprimir no log do Render quais modelos estão disponíveis
+        # LOG DE DIAGNÓSTICO (Mantido para segurança)
         try:
             app.logger.info("=== LISTA DE MODELOS DISPONÍVEIS ===")
             for m in genai.list_models():
                 if 'generateContent' in m.supported_generation_methods:
                     app.logger.info(f"Modelo encontrado: {m.name}")
             app.logger.info("======================================")
-        except Exception as list_error:
-            app.logger.warning(f"Não foi possível listar modelos: {list_error}")
-        # ---------------------------------------
+        except Exception:
+            pass
 
         safety_settings = {
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
@@ -320,7 +345,9 @@ def webhook_messages_upsert():
              initial_context = f"AVISO: O sistema não pôde buscar clientes devido a um erro na API."
         else:
             client_name = search_result.get("name") or "Cliente" 
-            initial_context = f"CONTEXTO INICIAL: O número de telefone {client_phone} pertence ao cliente '{client_name}' (ID {search_result.get('id')}). O bot DEVE usar o nome do cliente na resposta e NÃO DEVE perguntar o telefone novamente."
+            # Verificação segura caso o ID venha como string ou int
+            c_id = search_result.get('id') or "Desconhecido"
+            initial_context = f"CONTEXTO INICIAL: O número de telefone {client_phone} pertence ao cliente '{client_name}' (ID {c_id}). O bot DEVE usar o nome do cliente na resposta e NÃO DEVE perguntar o telefone novamente."
     
     reply = answer_with_gemini(text, current_history, initial_context, client_phone) 
     
