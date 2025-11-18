@@ -19,7 +19,7 @@ EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # Modelo compatível com google-generativeai==0.8.5
-GEMINI_MODEL_NAME = "models/gemini-1.5-flash"
+GEMINI_MODEL_NAME = "gemini-1.5-flash"
 
 # --- SUPABASE CONFIG ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
@@ -41,6 +41,7 @@ PROCESSED_IDS = deque(maxlen=500)
 CHAT_SESSIONS: Dict[str, List[str]] = {}
 CHAT_HISTORY_LENGTH = 10
 
+
 # ====== Utilidades ======
 def extract_text(message: Dict[str, Any]) -> str:
     if not isinstance(message, dict):
@@ -54,12 +55,14 @@ def extract_text(message: Dict[str, Any]) -> str:
             return (message[mid].get("caption") or "").strip()
     return ""
 
+
 def get_auth_headers():
     return {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
         "Content-Type": "application/json"
     }
+
 
 # ======================================================================
 # FERRAMENTAS (TOOLS)
@@ -127,6 +130,7 @@ TOOLS_MENU = [
     }
 ]
 
+
 # ======================================================================
 # FUNÇÕES DA API SUPABASE
 # ======================================================================
@@ -142,6 +146,7 @@ def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None):
     except Exception as e:
         return {"status": "erro", "mensagem": str(e)}
 
+
 def call_api_consultar_cliente_por_id(id_cliente: int):
     try:
         resp = requests.get(f"{CLIENTE_API_ENDPOINT}/{id_cliente}", headers=get_auth_headers(), timeout=20)
@@ -149,6 +154,7 @@ def call_api_consultar_cliente_por_id(id_cliente: int):
         return resp.json()
     except Exception as e:
         return {"status": "erro", "mensagem": str(e)}
+
 
 def call_api_consultar_cliente_por_telefone(telefone: str):
     try:
@@ -161,6 +167,7 @@ def call_api_consultar_cliente_por_telefone(telefone: str):
     except Exception as e:
         return {"status": "erro", "mensagem": str(e)}
 
+
 def call_api_atualizar_cliente(id_cliente: int, nome=None, telefone=None, email=None):
     try:
         payload = {k: v for k, v in {"name": nome, "phone": telefone, "email": email}.items() if v}
@@ -170,12 +177,14 @@ def call_api_atualizar_cliente(id_cliente: int, nome=None, telefone=None, email=
     except Exception as e:
         return {"status": "erro", "mensagem": str(e)}
 
+
 def call_api_excluir_cliente(id_cliente: int):
     try:
         resp = requests.delete(f"{CLIENTE_API_ENDPOINT}/{id_cliente}", headers=get_auth_headers(), timeout=20)
         return {"status": "sucesso" if resp.status_code == 204 else "erro", "mensagem": resp.text}
     except Exception as e:
         return {"status": "erro", "mensagem": str(e)}
+
 
 TOOL_ROUTER = {
     "criar_cliente": call_api_criar_cliente,
@@ -185,6 +194,7 @@ TOOL_ROUTER = {
     "excluir_cliente": call_api_excluir_cliente,
 }
 
+
 # ======================================================================
 # GEMINI CONFIGURAÇÃO
 # ======================================================================
@@ -192,6 +202,13 @@ gemini_model = None
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
+
+        print("\n=== MODELOS DISPONÍVEIS ===")
+        for m in genai.list_models():
+            if "generateContent" in m.supported_generation_methods:
+                print(f"✅ {m.name}")
+        print("============================\n")
+
         gemini_model = genai.GenerativeModel(
             GEMINI_MODEL_NAME,
             safety_settings={
@@ -207,6 +224,7 @@ if GEMINI_API_KEY:
         app.logger.exception(f"[GEMINI] Erro ao iniciar: {e}")
 else:
     app.logger.warning("[GEMINI] GEMINI_API_KEY não configurada.")
+
 
 # ======================================================================
 # GERAÇÃO DE RESPOSTA
@@ -228,12 +246,14 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
         app.logger.exception(f"[GEMINI] Erro: {e}")
         return "Desculpe, ocorreu um erro interno."
 
+
 # ======================================================================
 # ROTAS DO FLASK
 # ======================================================================
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"status": "ok", "service": "vinnax-bot"}), 200
+
 
 @app.route("/webhook/messages-upsert", methods=["POST"])
 def webhook_messages_upsert():
@@ -280,6 +300,7 @@ def webhook_messages_upsert():
             app.logger.exception(f"[EVOLUTION] Falha ao enviar: {e}")
 
     return jsonify({"status": "ok"}), 200
+
 
 # ======================================================================
 # EXECUÇÃO LOCAL (para testes)
