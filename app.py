@@ -1,7 +1,7 @@
 import os
 import json
 from collections import deque
-from typing import Any, Dict, List, Callable
+from typing import Any, Dict, List
 from flask import Flask, request, jsonify
 import requests
 import google.generativeai as genai
@@ -15,19 +15,11 @@ EVOLUTION_KEY = os.environ.get("EVOLUTION_KEY", "")
 EVOLUTION_URL_BASE = os.environ.get("EVOLUTION_URL_BASE", "")
 EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-
-# Modelo estável e compatível com a versão atual da API
-GEMINI_MODEL_NAME = "models/gemini-2.5-flash"
-
-# Configuração Supabase (opcional)
+LOVABLE_API_KEY = os.environ.get("LOVABLE_API_KEY", "")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
-if SUPABASE_URL:
-    base_url = SUPABASE_URL.rstrip("/")
-    CLIENTE_API_ENDPOINT = f"{base_url}/functions/v1/api-clients"
-else:
-    CLIENTE_API_ENDPOINT = os.environ.get("CLIENTE_API_ENDPOINT", "")
+EXTERNAL_AI_PROXY = f"{SUPABASE_URL}/functions/v1/external-ai-proxy"
+GEMINI_MODEL_NAME = "models/gemini-2.5-flash"
 
 app = Flask(__name__)
 
@@ -38,90 +30,13 @@ PROCESSED_IDS = deque(maxlen=500)
 CHAT_SESSIONS: Dict[str, List[str]] = {}
 CHAT_HISTORY_LENGTH = 10
 
-
 # ============================================================
-# FUNÇÕES AUXILIARES
+# INICIALIZAÇÃO DO GEMINI
 # ============================================================
-
-def extract_text(message: Dict[str, Any]) -> str:
-    """Extrai texto de mensagens do WhatsApp"""
-    if not isinstance(message, dict):
-        return ""
-    if "conversation" in message:
-        return (message.get("conversation") or "").strip()
-    if "extendedTextMessage" in message:
-        return (message["extendedTextMessage"].get("text") or "").strip()
-    for mid in ("imageMessage", "videoMessage", "documentMessage", "audioMessage"):
-        if mid in message:
-            return (message[mid].get("caption") or "").strip()
-    return ""
-
-
-def get_auth_headers():
-    return {
-        "apikey": SUPABASE_SERVICE_ROLE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-        "Content-Type": "application/json"
-    }
-
-
-# ============================================================
-# SUPABASE TOOL (exemplo)
-# ============================================================
-
-def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None):
-    if not (SUPABASE_SERVICE_ROLE_KEY and CLIENTE_API_ENDPOINT):
-        return {"status": "erro", "mensagem": "API não configurada."}
-    try:
-        payload = {"name": nome, "phone": telefone, "email": email}
-        payload = {k: v for k, v in payload.items() if v}
-        r = requests.post(CLIENTE_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=20)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        return {"status": "erro", "mensagem": str(e)}
-
-
-# ============================================================
-# TOOLS (GEMINI)
-# ============================================================
-
-TOOLS_MENU = [
-    {
-        "name": "criar_cliente",
-        "description": "Cadastra um novo cliente no sistema.",
-        "parameters": {
-            "type_": "OBJECT",
-            "properties": {
-                "nome": {"type": "STRING"},
-                "telefone": {"type": "STRING"},
-                "email": {"type": "STRING"}
-            },
-            "required": ["nome"]
-        }
-    }
-]
-
-TOOL_ROUTER = {
-    "criar_cliente": call_api_criar_cliente
-}
-
-
-# ============================================================
-# GEMINI CONFIG
-# ============================================================
-
 gemini_model = None
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-
-        app.logger.info("=== MODELOS DISPONÍVEIS ===")
-        for m in genai.list_models():
-            if "generateContent" in m.supported_generation_methods:
-                app.logger.info(f"✅ {m.name}")
-        app.logger.info("============================")
-
         gemini_model = genai.GenerativeModel(
             GEMINI_MODEL_NAME,
             safety_settings={
@@ -130,40 +45,55 @@ if GEMINI_API_KEY:
                 HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
                 HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
             },
-            tools=TOOLS_MENU
         )
-
         app.logger.info(f"[GEMINI] Modelo carregado: {GEMINI_MODEL_NAME}")
     except Exception as e:
-        app.logger.exception(f"[GEMINI] Erro ao inicializar SDK: {e}")
+        app.logger.exception(f"[GEMINI] Erro ao inicializar: {e}")
 else:
     app.logger.warning("[GEMINI] GEMINI_API_KEY não configurada.")
 
-
 # ============================================================
-# FUNÇÃO DE RESPOSTA
+# FUNÇÃO DE RESPOSTA NATURAL COM GEMINI
 # ============================================================
 
-def answer_with_gemini(user_text: str, chat_history: List[str]):
+def answer_with_gemini(user_text: str, chat_history: List[str]) -> str:
     if not gemini_model:
-        return "Olá! Sistema iniciado com sucesso."
+        return "IA não configurada corretamente."
     try:
-        history_str = "\n".join(chat_history)
+        history = "\n".join(chat_history)
         prompt = (
-            "Você é um assistente da Vinnax Beauty. "
-            "Responda de forma simpática e natural.\n"
-            f"Histórico:\n{history_str}\n"
-            f"Cliente: {user_text}\nAtendente:"
+            "Você é o assistente da Vinnax Beauty. "
+            "Fale de forma simpática e natural. "
+            "Analise o texto e, se for uma solicitação de ação administrativa (como criar cliente, gerar orçamento, buscar produtos, etc.), "
+            "resuma a intenção em um formato JSON no final da resposta, no campo 'action', apenas se for necessário executar algo.\n\n"
+            f"Histórico:\n{history}\nUsuário: {user_text}\nAssistente:"
         )
         response = gemini_model.generate_content(prompt)
         return response.candidates[0].content.parts[0].text.strip()
     except Exception as e:
-        app.logger.exception(f"[GEMINI] Erro geral: {e}")
+        app.logger.exception(f"[GEMINI] Erro: {e}")
         return f"Erro interno: {e}"
 
+# ============================================================
+# INTEGRAÇÃO COM LOVABLE VIA EXTERNAL-AI-PROXY
+# ============================================================
+
+def call_lovable_proxy(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Encaminha a intenção para o proxy seguro do Supabase."""
+    try:
+        headers = {
+            "x-api-key": LOVABLE_API_KEY,
+            "Content-Type": "application/json"
+        }
+        r = requests.post(EXTERNAL_AI_PROXY, headers=headers, json=payload, timeout=30)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        app.logger.exception(f"[LOVABLE] Erro ao chamar external-ai-proxy: {e}")
+        return {"status": "erro", "mensagem": str(e)}
 
 # ============================================================
-# ROTAS
+# ROTAS BÁSICAS
 # ============================================================
 
 @app.route("/", methods=["GET"])
@@ -180,56 +110,56 @@ def test_ai():
     reply = answer_with_gemini(question, [])
     return jsonify({"reply": reply}), 200
 
+# ============================================================
+# NOVO ENDPOINT: /api/ai (INTEGRAÇÃO SUPABASE)
+# ============================================================
 
-@app.route("/webhook/messages-upsert", methods=["POST"])
-def webhook_messages_upsert():
-    raw = request.get_json(silent=True) or {}
-    envelope = raw.get("data", raw)
+@app.route("/api/ai", methods=["POST"])
+def api_ai():
+    """Recebe requisições do Supabase, processa via Gemini e envia ao proxy Lovable."""
+    try:
+        data = request.get_json(force=True)
+        user_message = data.get("message") or data.get("text") or ""
+        client_id = data.get("client_id")
+        phone = data.get("phone")
 
-    if isinstance(envelope, list) and envelope:
-        envelope = envelope[0]
-    if not isinstance(envelope, dict):
-        return jsonify({"status": "bad_payload"}), 200
+        if not user_message:
+            return jsonify({"error": "Campo 'message' ou 'text' é obrigatório."}), 400
 
-    key = envelope.get("key", {}) or {}
-    if key.get("fromMe"):
-        return jsonify({"status": "own_message_ignored"}), 200
+        # Recupera histórico do cliente (se existir)
+        history = CHAT_SESSIONS.get(phone or "default", [])
 
-    message = envelope.get("message", {}) or {}
-    if not message:
-        return jsonify({"status": "no_message_ignored"}), 200
+        # Gera resposta com o Gemini
+        reply_text = answer_with_gemini(user_message, history)
 
-    jid = (key.get("remoteJid") or envelope.get("participant") or "").strip()
-    if not jid.endswith("@s.whatsapp.net"):
-        return jsonify({"status": "non_user_ignored"}), 200
-    client_phone = jid.replace("@s.whatsapp.net", "")
+        # Atualiza histórico local
+        history.append(f"Cliente: {user_message}")
+        history.append(f"Atendente: {reply_text}")
+        CHAT_SESSIONS[phone or "default"] = history[-CHAT_HISTORY_LENGTH:]
 
-    text = extract_text(message).strip()
-    if not text:
-        return jsonify({"status": "no_text_ignored"}), 200
+        # Tenta detectar se há JSON embutido no final (ação sugerida)
+        action_payload = None
+        if "{" in reply_text and "}" in reply_text:
+            try:
+                action_payload = json.loads(reply_text[reply_text.index("{"):])
+            except Exception:
+                pass
 
-    if client_phone not in CHAT_SESSIONS:
-        CHAT_SESSIONS[client_phone] = []
-    history = CHAT_SESSIONS[client_phone]
+        # Caso o Gemini tenha sugerido uma ação, repassa ao proxy
+        proxy_result = None
+        if action_payload:
+            proxy_result = call_lovable_proxy(action_payload)
 
-    reply = answer_with_gemini(text, history)
+        # Monta a resposta final
+        return jsonify({
+            "reply": reply_text,
+            "action": action_payload or None,
+            "proxy_result": proxy_result or None
+        }), 200
 
-    history.append(f"Cliente: {text}")
-    history.append(f"Atendente: {reply}")
-    while len(history) > CHAT_HISTORY_LENGTH:
-        history.pop(0)
-
-    if EVOLUTION_KEY and EVOLUTION_URL_BASE and EVOLUTION_INSTANCE:
-        try:
-            url_send = f"{EVOLUTION_URL_BASE}/message/sendtext/{EVOLUTION_INSTANCE}"
-            headers = {"apikey": EVOLUTION_KEY, "Content-Type": "application/json"}
-            payload = {"number": client_phone, "text": reply}
-            requests.post(url_send, json=payload, headers=headers, timeout=20)
-        except Exception as e:
-            app.logger.exception(f"[EVOLUTION] Erro ao enviar mensagem: {e}")
-
-    return jsonify({"status": "ok"}), 200
-
+    except Exception as e:
+        app.logger.exception(f"[API AI] Erro geral: {e}")
+        return jsonify({"error": str(e)}), 500
 
 # ============================================================
 # EXECUÇÃO LOCAL
