@@ -1,219 +1,235 @@
 import os
 import json
+import threading
+import sys
+import re
 from collections import deque
-from typing import Any, Dict, List
-import threading 
-import re 
-import sys 
-from requests.exceptions import HTTPError 
+from typing import Dict, Any, List
 
 from flask import Flask, request, jsonify
 import requests
-import google.generativeai as genai # Usando a biblioteca padrão compatível
-
-app = Flask(__name__)
+import google.generativeai as genai
+from google.api_core.exceptions import InvalidArgument
 
 # ====== Configurações ======
+app = Flask(__name__)
+
+# Chaves do Render
 EVOLUTION_KEY = os.environ.get("EVOLUTION_KEY", "")
 EVOLUTION_URL_BASE = os.environ.get("EVOLUTION_URL_BASE", "")
 EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 
+# Configuração do Gemini
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "models/gemini-1.5-pro-latest")
+# Usando o modelo flash que é mais rápido e barato, ou pro se preferir
+GEMINI_MODEL_NAME = "models/gemini-1.5-flash-latest" 
 
-# Endpoints (Suas variáveis já configuradas)
+# Chave do seu Sistema (Lovable/Supabase)
 LOVABLE_API_KEY = os.environ.get("LOVABLE_API_KEY", "") 
-CLIENTE_API_ENDPOINT = os.environ.get("CLIENTE_API_ENDPOINT", "")
-PRODUTO_API_ENDPOINT = os.environ.get("PRODUTO_API_ENDPOINT", "")
-OS_API_ENDPOINT = os.environ.get("OS_API_ENDPOINT", "")
-ORCAMENTO_API_ENDPOINT = os.environ.get("ORCAMENTO_API_ENDPOINT", "")
 
-# Memória local
+# Endpoints das suas APIs
+CLIENTE_API_ENDPOINT = "https://ebiitbpdvskreiuoeyaz.supabase.co/functions/v1/api-clients"
+PRODUTO_API_ENDPOINT = "https://ebiitbpdvskreiuoeyaz.supabase.co/functions/v1/api-products"
+OS_API_ENDPOINT = "https://ebiitbpdvskreiuoeyaz.supabase.co/functions/v1/api-service-orders"
+ORCAMENTO_API_ENDPOINT = "https://ebiitbpdvskreiuoeyaz.supabase.co/functions/v1/api-quotes"
+
+# Memória e Controle
 PROCESSED_IDS = deque(maxlen=500)
-CHAT_SESSIONS: Dict[str, List[str]] = {}
-CHAT_HISTORY_LENGTH = 15
+CHAT_SESSIONS: Dict[str, List[Dict]] = {} # Histórico compatível com Gemini SDK
+CHAT_HISTORY_LENGTH = 20
 
-# ====== Utilidades ======
-def extract_text(message: Dict[str, Any]) -> str:
-    if not isinstance(message, dict): return ""
-    if "conversation" in message: return (message.get("conversation") or "").strip()
-    if "extendedTextMessage" in message: return (message["extendedTextMessage"].get("text") or "").strip()
-    for mid in ("imageMessage", "videoMessage", "documentMessage", "audioMessage"):
-        if mid in message: return (message[mid].get("caption") or "").strip()
-    return ""
+# ====== Inicialização do Gemini ======
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+else:
+    print("ERRO: GEMINI_API_KEY não encontrada.", file=sys.stderr)
 
-def get_auth_headers():
+# ====== Definição das Ferramentas (Tools) ======
+# Definindo as ferramentas de forma que o SDK entenda nativamente
+tools_lista = [
+    # CLIENTE
+    {"name": "criar_cliente", "description": "Cadastra cliente novo. O telefone é inserido automaticamente pelo sistema.", "parameters": {"type": "OBJECT", "properties": {"nome": {"type": "STRING"}, "email": {"type": "STRING"}}, "required": ["nome"]}},
+    {"name": "consultar_cliente_por_telefone", "description": "Verifica se o cliente já tem cadastro pelo telefone.", "parameters": {"type": "OBJECT", "properties": {"telefone": {"type": "STRING"}}, "required": ["telefone"]}},
+    # PRODUTO
+    {"name": "consultar_produtos_todos", "description": "Lista todos os produtos e serviços disponíveis na gráfica.", "parameters": {"type": "OBJECT", "properties": {}}},
+]
+
+# ====== Funções Utilitárias ======
+def get_headers():
     return {"x-api-key": LOVABLE_API_KEY, "Content-Type": "application/json"}
 
 def normalize_phone(phone: str) -> str:
-    """Normaliza número de telefone para busca no banco."""
+    """Remove caracteres e formata o telefone."""
     if not phone: return ""
-    phone = str(phone).replace("@s.whatsapp.net", "").strip()
-    if phone.startswith("55"): phone = phone[2:]
-    if len(phone) >= 11 and phone[2] == "0": phone = phone[:2] + phone[3:]
-    return phone
+    p = str(phone).replace("@s.whatsapp.net", "").strip()
+    if p.startswith("55"): p = p[2:]
+    # Remove o 9 extra ou 0 de operadora se necessário (lógica simplificada)
+    if len(p) > 11 and p.startswith("0"): p = p[1:]
+    return p
 
-def log_api_error(e: Exception, function_name: str) -> Dict[str, Any]:
-    error_msg = f"Erro em {function_name}: {str(e)}"
-    print(f"[API_CALL] {error_msg}", file=sys.stderr)
-    return {"status": "erro", "mensagem": "Houve um erro ao consultar o sistema."}
-
-# ====== FUNÇÕES DE API (As Ferramentas) ======
-
-def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None) -> Dict[str, Any]:
+# ====== Funções de API (Ação Real) ======
+def api_criar_cliente(nome, email=None, telefone=None):
     try:
-        # Normaliza o telefone antes de enviar
-        telefone_norm = normalize_phone(telefone) if telefone else None
-        payload = {"name": nome, "phone": telefone_norm, "email": email}
-        payload = {k: v for k, v in payload.items() if v}
-        response = requests.post(CLIENTE_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e: return log_api_error(e, "criar_cliente")
+        if not telefone: return {"erro": "Telefone obrigatório"}
+        payload = {"name": nome, "phone": normalize_phone(telefone), "email": email}
+        res = requests.post(CLIENTE_API_ENDPOINT, json=payload, headers=get_headers(), timeout=10)
+        res.raise_for_status()
+        return res.json()
+    except Exception as e: return {"erro": str(e)}
 
-def call_api_consultar_cliente_por_telefone(telefone: str) -> Dict[str, Any]:
+def api_consultar_cliente(telefone):
     try:
-        telefone_norm = normalize_phone(telefone)
-        response = requests.get(CLIENTE_API_ENDPOINT, headers=get_auth_headers(), timeout=10)
-        response.raise_for_status()
-        clientes = response.json()
-        if isinstance(clientes, list):
-            encontrado = next((c for c in clientes if c.get('phone') == telefone_norm), None)
-            if encontrado: return encontrado
+        tel_norm = normalize_phone(telefone)
+        res = requests.get(CLIENTE_API_ENDPOINT, headers=get_headers(), timeout=10)
+        res.raise_for_status()
+        clientes = res.json()
+        # Filtro manual simples
+        for c in clientes:
+            if normalize_phone(c.get("phone", "")) == tel_norm:
+                return c
         return {"status": "nao_encontrado"}
-    except Exception as e: return log_api_error(e, "consultar_cliente_por_telefone")
+    except Exception as e: return {"erro": str(e)}
 
-def call_api_consultar_produtos_todos() -> Dict[str, Any]:
+def api_listar_produtos():
     try:
-        response = requests.get(PRODUTO_API_ENDPOINT, headers=get_auth_headers(), timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e: return log_api_error(e, "consultar_produtos_todos")
+        res = requests.get(PRODUTO_API_ENDPOINT, headers=get_headers(), timeout=10)
+        res.raise_for_status()
+        return res.json()
+    except Exception as e: return {"erro": str(e)}
 
-# ... (Adicione aqui as outras funções de OS e Orçamento se necessário, mas estas são as principais para o teste inicial)
-
-# ====== Menu de Ferramentas ======
-TOOLS_MENU = [
-    {"name": "criar_cliente", "description": "Cadastra cliente. Requer nome. Telefone é injetado automaticamente.", "parameters": {"type": "OBJECT", "properties": {"nome": {"type": "STRING"}, "email": {"type": "STRING"}}, "required": ["nome"]}},
-    {"name": "consultar_cliente_por_telefone", "description": "Busca cliente pelo telefone.", "parameters": {"type": "OBJECT", "properties": {"telefone": {"type": "STRING"}}, "required": ["telefone"]}},
-    {"name": "consultar_produtos_todos", "description": "Lista todos os produtos e serviços disponíveis.", "parameters": {"type": "OBJECT", "properties": {}}},
-]
-
-TOOL_ROUTER = {
-    "criar_cliente": call_api_criar_cliente,
-    "consultar_cliente_por_telefone": call_api_consultar_cliente_por_telefone,
-    "consultar_produtos_todos": call_api_consultar_produtos_todos
+# Mapa de funções para execução
+FUNCTION_MAP = {
+    "criar_cliente": api_criar_cliente,
+    "consultar_cliente_por_telefone": api_consultar_cliente,
+    "consultar_produtos_todos": api_listar_produtos
 }
 
-# ====== Inicialização do Gemini ======
-gemini_model = None
-if GEMINI_API_KEY:
+# ====== Lógica do Chat ======
+def chat_with_gemini(user_text, jid_completo):
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        gemini_model = genai.GenerativeModel(GEMINI_MODEL_NAME, tools=TOOLS_MENU)
-        print("[SISTEMA] Gemini carregado com sucesso.", file=sys.stderr)
-    except Exception as e:
-        print(f"[SISTEMA] Erro ao carregar Gemini: {e}", file=sys.stderr)
-
-# ====== Lógica Principal ======
-def answer_with_gemini(user_text, chat_history, initial_context, client_phone):
-    if not gemini_model: return "Desculpe, estou reiniciando meu cérebro. Tente em instantes."
-    
-    system_prompt = (
-        "Você é o assistente da Gráfica JB Impressões. Seja cordial.\n"
-        "1. Use o CONTEXTO INICIAL. Se o cliente não existe, peça o nome e use `criar_cliente`.\n"
-        "2. Se pedir serviços, use `consultar_produtos_todos`.\n"
-        "3. Responda em português."
-    )
-    
-    history_str = "\n".join(chat_history)
-    full_prompt = f"{system_prompt}\n\n{initial_context}\n\nHistórico:\n{history_str}\n\nCliente: {user_text}\nAtendente:"
-
-    try:
-        response = gemini_model.generate_content(full_prompt)
-        candidate = response.candidates[0]
+        # 1. Prepara o histórico
+        if jid_completo not in CHAT_SESSIONS:
+            CHAT_SESSIONS[jid_completo] = []
         
-        # Verificação segura de Tool Call (sem importar classes extras)
-        part = candidate.content.parts[0]
+        # 2. Cria o modelo com as ferramentas
+        model = genai.GenerativeModel(
+            model_name=GEMINI_MODEL_NAME,
+            tools=tools_lista
+            # REMOVIDO SAFETY_SETTINGS para evitar erro 400
+        )
+        
+        # 3. Inicia o chat com histórico
+        chat = model.start_chat(history=CHAT_SESSIONS[jid_completo])
+        
+        # 4. Envia mensagem do usuário
+        # Adicionamos um contexto oculto sobre quem é o usuário
+        telefone_usuario = normalize_phone(jid_completo)
+        
+        # Prompt do sistema injetado na mensagem (técnica segura)
+        prompt_sistema = (
+            f"[SISTEMA: O usuário tem o telefone {telefone_usuario}. "
+            "Você é o assistente da Gráfica JB. "
+            "Se o usuário disser o nome e não tiver cadastro, use a ferramenta `criar_cliente` imediatamente. "
+            "O telefone será injetado automaticamente pela ferramenta, não peça o telefone.] "
+            f"{user_text}"
+        )
+        
+        response = chat.send_message(prompt_sistema)
+        
+        # 5. Verifica se a IA quer usar uma ferramenta (Function Call)
+        # O SDK novo facilita isso. Ele processa a chamada automaticamente se configurado,
+        # mas aqui vamos fazer manualmente para garantir a injeção do telefone.
+        
+        part = response.candidates[0].content.parts[0]
+        
         if part.function_call:
             fname = part.function_call.name
-            args = dict(part.function_call.args)
+            fargs = dict(part.function_call.args)
             
-            # Injeção de Telefone
-            if fname == "criar_cliente" and client_phone:
-                args["telefone"] = client_phone
+            print(f"[IA] Chamando ferramenta: {fname}", file=sys.stderr)
             
-            if fname in TOOL_ROUTER:
-                print(f"[IA] Chamando ferramenta: {fname}", file=sys.stderr)
-                result = TOOL_ROUTER[fname](**args)
+            # INJEÇÃO AUTOMÁTICA DE TELEFONE
+            if fname in ["criar_cliente", "consultar_cliente_por_telefone"]:
+                fargs["telefone"] = jid_completo # Passamos o JID, a função normaliza
+            
+            # Executa a função
+            if fname in FUNCTION_MAP:
+                api_result = FUNCTION_MAP[fname](**fargs)
                 
-                tool_response = {
-                    "function_response": {
-                        "name": fname,
-                        "response": {"content": json.dumps(result)}
-                    }
-                }
-                final_res = gemini_model.generate_content([full_prompt, part, tool_response])
-                return final_res.text.strip()
+                # Devolve o resultado para a IA gerar a resposta final
+                # Na versão nova do SDK, enviamos o resultado como uma ToolResponse
+                response = chat.send_message(
+                    genai.protos.Content(
+                        parts=[genai.protos.Part(
+                            function_response=genai.protos.FunctionResponse(
+                                name=fname,
+                                response={"result": api_result}
+                            )
+                        )]
+                    )
+                )
+        
+        # 6. Pega o texto final
+        resposta_final = response.text
+        
+        # Atualiza histórico local (limite de segurança)
+        if len(CHAT_SESSIONS[jid_completo]) > 20:
+            CHAT_SESSIONS[jid_completo] = CHAT_SESSIONS[jid_completo][-10:]
             
-        return part.text.strip()
+        return resposta_final
 
     except Exception as e:
-        print(f"[IA] Erro na geração: {e}", file=sys.stderr)
-        return "Tive um problema técnico, desculpe."
+        print(f"[IA ERRO] {e}", file=sys.stderr)
+        return "Desculpe, tive um erro técnico rápido. Pode repetir?"
 
-# ====== Rotas ======
-@app.route("/", methods=["GET"])
-def health():
-    return jsonify({"status": "ok"}), 200
-
-def process_message_thread(data):
+# ====== Processamento do Webhook ======
+def process_webhook_data(data):
     try:
-        envelope = data.get("data", data)
-        if isinstance(envelope, list): envelope = envelope[0]
-        if not isinstance(envelope, dict): return
+        # Extração segura de dados
+        msg = data.get("data", {}).get("message", {})
+        if not msg: return
         
-        key = envelope.get("key", {})
-        if key.get("fromMe"): return
+        remote_jid = data.get("data", {}).get("key", {}).get("remoteJid", "")
+        if not remote_jid or "status@broadcast" in remote_jid: return
         
-        msg_id = key.get("id")
-        if msg_id in PROCESSED_IDS: return
-        PROCESSED_IDS.append(msg_id)
+        # Extrair texto
+        user_text = (msg.get("conversation") or 
+                     msg.get("extendedTextMessage", {}).get("text") or "").strip()
         
-        jid = key.get("remoteJid", "")
-        client_phone = normalize_phone(jid)
-        message = envelope.get("message", {})
-        text = extract_text(message)
+        if not user_text: return
         
-        if not text: return
-
-        if jid not in CHAT_SESSIONS: CHAT_SESSIONS[jid] = []
+        print(f"[MSG] Recebido de {remote_jid}: {user_text}", file=sys.stderr)
         
-        # Contexto Inicial
-        initial_context = ""
-        cliente = call_api_consultar_cliente_por_telefone(client_phone)
-        if cliente.get("status") == "nao_encontrado":
-            initial_context = f"AVISO: Cliente novo (Telefone {client_phone}). Peça o nome para cadastrar."
-        elif "id" in cliente:
-            initial_context = f"Cliente identificado: {cliente.get('name')}."
-
-        reply = answer_with_gemini(text, CHAT_SESSIONS[jid], initial_context, client_phone)
+        # Chamar IA
+        resposta = chat_with_gemini(user_text, remote_jid)
         
-        CHAT_SESSIONS[jid].append(f"Cliente: {text}")
-        CHAT_SESSIONS[jid].append(f"Atendente: {reply}")
-        
+        # Enviar Resposta
         if EVOLUTION_URL_BASE and EVOLUTION_KEY:
-            requests.post(
-                f"{EVOLUTION_URL_BASE}/message/sendtext/{EVOLUTION_INSTANCE}",
-                headers={"apikey": EVOLUTION_KEY},
-                json={"number": jid, "text": reply}
-            )
-            
+            url = f"{EVOLUTION_URL_BASE}/message/sendtext/{EVOLUTION_INSTANCE}"
+            payload = {"number": remote_jid, "text": resposta}
+            headers = {"apikey": EVOLUTION_KEY, "Content-Type": "application/json"}
+            requests.post(url, json=payload, headers=headers)
+            print("[MSG] Resposta enviada.", file=sys.stderr)
+
     except Exception as e:
-        print(f"[PROCESSOR] Erro: {e}", file=sys.stderr)
+        print(f"[THREAD ERRO] {e}", file=sys.stderr)
 
 @app.route("/webhook/messages-upsert", methods=["POST"])
 def webhook():
+    # Responde rápido para não travar o WhatsApp
     data = request.get_json(silent=True) or {}
-    threading.Thread(target=process_message_thread, args=(data,)).start()
-    return jsonify({"status": "ack"}), 200
+    
+    # Filtra mensagens enviadas por mim mesmo
+    if data.get("data", {}).get("key", {}).get("fromMe"):
+        return jsonify({"status": "ignored"}), 200
+
+    # Inicia thread
+    threading.Thread(target=process_webhook_data, args=(data,)).start()
+    return jsonify({"status": "queued"}), 200
+
+@app.route("/", methods=["GET"])
+def health():
+    return "Bot Online", 200
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
