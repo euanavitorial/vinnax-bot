@@ -6,10 +6,10 @@ from typing import Any, Dict, List, Callable
 from flask import Flask, request, jsonify
 import requests
 
-# --- IMPORTAÇÃO PADRÃO E SEGURA ---
+# --- IMPORTAÇÃO PADRÃO ---
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
-# ----------------------------------
+# -------------------------
 
 # ====== Config (via variáveis de ambiente) ======
 EVOLUTION_KEY = os.environ.get("EVOLUTION_KEY", "")
@@ -18,8 +18,8 @@ EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# --- CORREÇÃO: Usando o ID específico da versão "001" que é mais estável ---
-GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash-001")
+# Vamos tentar o nome padrão novamente. Se falhar, o diagnóstico nos dirá o nome certo.
+GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
 
 LOVABLE_API_KEY = os.environ.get("LOVABLE_API_KEY", "") 
 CLIENTE_API_ENDPOINT = os.environ.get("CLIENTE_API_ENDPOINT", "https://ebiitbpdvskreiuoeyaz.supabase.co/functions/v1/api-clients")
@@ -35,7 +35,6 @@ CHAT_HISTORY_LENGTH = 10
 
 # ====== Utilidades WhatsApp ======
 def extract_text(message: Dict[str, Any]) -> str:
-    """Extrai o texto de diversos tipos de mensagem do WhatsApp."""
     if not isinstance(message, dict): return ""
     if "conversation" in message: return (message.get("conversation") or "").strip()
     if "extendedTextMessage" in message: return (message["extendedTextMessage"].get("text") or "").strip()
@@ -44,7 +43,6 @@ def extract_text(message: Dict[str, Any]) -> str:
     return ""
 
 def get_auth_headers():
-    """Retorna o cabeçalho de autenticação para as APIs do Lovable."""
     return {
         "x-api-key": LOVABLE_API_KEY,
         "Content-Type": "application/json"
@@ -52,7 +50,7 @@ def get_auth_headers():
 
 
 # ======================================================================
-# PASSO 1: O "MENU" DE FERRAMENTAS PARA O GEMINI
+# FERRAMENTAS (TOOLS)
 # ======================================================================
 TOOLS_MENU = [
     {
@@ -119,10 +117,8 @@ TOOLS_MENU = [
 
 
 # ======================================================================
-# PASSO 2: AS FUNÇÕES REAIS DA API (ACIMA DO ROUTER)
+# FUNÇÕES DA API
 # ======================================================================
-
-# --- FUNÇÕES DE CLIENTE ---
 def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None) -> Dict[str, Any]:
     if not (LOVABLE_API_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
@@ -176,10 +172,6 @@ def call_api_excluir_cliente(id_cliente: int) -> Dict[str, Any]:
         return response.json()
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao excluir cliente: {e}"}
 
-
-# ======================================================================
-# PASSO 3: O "ROTEADOR" (MAPA DE FERRAMENTAS)
-# ======================================================================
 TOOL_ROUTER: Dict[str, Callable[..., Dict[str, Any]]] = {
     "criar_cliente": call_api_criar_cliente,
     "consultar_cliente_por_id": call_api_consultar_cliente_por_id,
@@ -188,13 +180,24 @@ TOOL_ROUTER: Dict[str, Callable[..., Dict[str, Any]]] = {
     "excluir_cliente": call_api_excluir_cliente,
 }
 
-# ====== Inicialização do Gemini ======
+# ====== Inicialização do Gemini e DIAGNÓSTICO ======
 gemini_model = None
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         
-        # Categorias de segurança manuais
+        # --- BLOCO DE DIAGNÓSTICO DE MODELOS ---
+        # Isso vai imprimir no log do Render quais modelos estão disponíveis
+        try:
+            app.logger.info("=== LISTA DE MODELOS DISPONÍVEIS ===")
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    app.logger.info(f"Modelo encontrado: {m.name}")
+            app.logger.info("======================================")
+        except Exception as list_error:
+            app.logger.warning(f"Não foi possível listar modelos: {list_error}")
+        # ---------------------------------------
+
         safety_settings = {
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
             HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -207,9 +210,9 @@ if GEMINI_API_KEY:
             safety_settings=safety_settings,
             tools=TOOLS_MENU
         )
-        app.logger.info(f"[GEMINI] Modelo carregado: {GEMINI_MODEL_NAME}")
+        app.logger.info(f"[GEMINI] Modelo inicializado: {GEMINI_MODEL_NAME}")
     except Exception as e:
-        app.logger.exception(f"[GEMINI] Erro ao inicializar SDK: {e}")
+        app.logger.exception(f"[GEMINI] Erro Fatal ao inicializar SDK: {e}")
 else:
     app.logger.warning("[GEMINI] GEMINI_API_KEY não configurada.")
 
@@ -239,11 +242,9 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
             f"=== Nova Mensagem ===\nCliente: {user_text}\nAtendente:"
         )
 
-        # 1. Primeira chamada ao Gemini
         response = gemini_model.generate_content(full_prompt)
         candidate = response.candidates[0]
         
-        # 2. Verificar se o Gemini pediu para usar uma ferramenta
         part = candidate.content.parts[0]
         if hasattr(part, 'function_call') and part.function_call:
             app.logger.info("[GEMINI] Pedido de 'Tool Use' detectado.")
@@ -252,14 +253,11 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
             tool_name = function_call.name
             tool_args = dict(function_call.args)
             
-            # 3. Usar o ROTEADOR
             if tool_name in TOOL_ROUTER:
                 app.logger.info(f"[ROUTER] Roteando para a função: '{tool_name}'")
-                
                 function_to_call = TOOL_ROUTER[tool_name]
                 api_result = function_to_call(**tool_args)
                 
-                # 4. Segunda chamada ao Gemini (com o resultado da API)
                 tool_response_part = {
                     "function_response": {
                         "name": tool_name,
@@ -271,16 +269,12 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
                     [full_prompt, candidate.content, tool_response_part]
                 )
                 txt = response_final.candidates[0].content.parts[0].text
-            
             else:
-                app.logger.warning(f"[ROUTER] Ferramenta '{tool_name}' não encontrada no roteador.")
                 txt = "Desculpe, tentei usar uma ferramenta que não conheço."
-        
         else:
             txt = part.text
 
-        if not txt:
-            return "Poderia repetir, por favor?"
+        if not txt: return "Poderia repetir, por favor?"
         return txt.strip()
         
     except Exception as e:
@@ -307,7 +301,6 @@ def webhook_messages_upsert():
         if msg_id in PROCESSED_IDS: return jsonify({"status": "duplicate_ignored"}), 200
         PROCESSED_IDS.append(msg_id)
     
-    # 1. Extração do Telefone (JID)
     jid = (key.get("remoteJid") or envelope.get("participant") or "").strip()
     if not jid.endswith("@s.whatsapp.net"): return jsonify({"status": "non_user_ignored"}), 200
     client_phone = jid.replace("@s.whatsapp.net", "") 
@@ -318,11 +311,9 @@ def webhook_messages_upsert():
     if number not in CHAT_SESSIONS: CHAT_SESSIONS[number] = []
     current_history = CHAT_SESSIONS[number]
     
-    # 2. Busca Automática de Cliente (Contexto Inicial)
     initial_context = ""
     if not current_history: 
         search_result = call_api_consultar_cliente_por_telefone(client_phone)
-        
         if search_result.get("status") == "nao_encontrado":
             initial_context = f"AVISO: O sistema não encontrou nenhum cliente associado ao telefone {client_phone}. Peça o nome para cadastrar."
         elif search_result.get("status") == "erro":
@@ -331,26 +322,21 @@ def webhook_messages_upsert():
             client_name = search_result.get("name") or "Cliente" 
             initial_context = f"CONTEXTO INICIAL: O número de telefone {client_phone} pertence ao cliente '{client_name}' (ID {search_result.get('id')}). O bot DEVE usar o nome do cliente na resposta e NÃO DEVE perguntar o telefone novamente."
     
-    # 3. Geração da Resposta
     reply = answer_with_gemini(text, current_history, initial_context, client_phone) 
     
-    # 4. Salvamento da Memória
     CHAT_SESSIONS[number].append(f"Cliente: {text}")
     CHAT_SESSIONS[number].append(f"Atendente: {reply}")
     while len(CHAT_SESSIONS[number]) > CHAT_HISTORY_LENGTH:
         CHAT_SESSIONS[number].pop(0)
 
-    # 5. Envio via Evolution API
     if not (EVOLUTION_KEY and EVOLUTION_URL_BASE and EVOLUTION_INSTANCE):
-        app.logger.warning("[EVOLUTION] Variáveis de ambiente ausentes.")
         return jsonify({"status": "missing_env"}), 200
     
     try:
         url_send = f"{EVOLUTION_URL_BASE}/message/sendtext/{EVOLUTION_INSTANCE}"
         headers = {"apikey": EVOLUTION_KEY, "Content-Type": "application/json"}
         payload = {"number": number, "text": reply}
-        res = requests.post(url_send, json=payload, headers=headers, timeout=20)
-        app.logger.info(f"[EVOLUTION] {res.status_code} -> {res.text}")
+        requests.post(url_send, json=payload, headers=headers, timeout=20)
     except Exception as e:
         app.logger.exception(f"[EVOLUTION] Erro ao enviar: {e}")
     return jsonify({"status": "ok"}), 200
