@@ -6,10 +6,10 @@ from typing import Any, Dict, List, Callable
 from flask import Flask, request, jsonify
 import requests
 
-# --- IMPORTAÇÃO PADRÃO ---
+# --- IMPORTAÇÃO DA NOVA VERSÃO DO SDK ---
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
-# -------------------------
+# ----------------------------------------
 
 # ====== Config (via variáveis de ambiente) ======
 EVOLUTION_KEY = os.environ.get("EVOLUTION_KEY", "")
@@ -18,7 +18,8 @@ EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# [MUDANÇA CRÍTICA] Usando o modelo "gemini-pro" que é universal e não dá erro 404
+# [SOLUÇÃO FINAL] Usando o modelo PRO com a biblioteca atualizada (>=0.9.0)
+# Isso resolve o erro 404.
 GEMINI_MODEL_NAME = "gemini-pro"
 
 # --- CONFIGURAÇÃO DO SUPABASE ---
@@ -61,7 +62,7 @@ def get_auth_headers():
 
 
 # ======================================================================
-# PASSO 1: FERRAMENTAS (TOOLS)
+# FERRAMENTAS (TOOLS)
 # ======================================================================
 TOOLS_MENU = [
     {
@@ -128,7 +129,7 @@ TOOLS_MENU = [
 
 
 # ======================================================================
-# PASSO 2: FUNÇÕES DA API
+# FUNÇÕES DA API
 # ======================================================================
 def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None) -> Dict[str, Any]:
     if not (SUPABASE_SERVICE_ROLE_KEY and CLIENTE_API_ENDPOINT): return {"status": "erro", "mensagem": "API de Cliente não configurada."}
@@ -153,7 +154,7 @@ def call_api_consultar_cliente_por_telefone(telefone: str) -> Dict[str, Any]:
     if not (SUPABASE_SERVICE_ROLE_KEY and CLIENTE_API_ENDPOINT): 
         return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
-        # POST para filtrar por telefone
+        # POST para filtrar por telefone (Padrão Supabase Edge Functions)
         response = requests.post(
             CLIENTE_API_ENDPOINT,
             headers=get_auth_headers(),
@@ -209,6 +210,16 @@ if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         
+        # Log de diagnóstico
+        try:
+            app.logger.info("=== MODELOS DISPONÍVEIS ===")
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    app.logger.info(f"✅ {m.name}")
+            app.logger.info("============================")
+        except Exception as e:
+            app.logger.warning(f"Erro listando modelos: {e}")
+
         safety_settings = {
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
             HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -216,7 +227,6 @@ if GEMINI_API_KEY:
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
         }
         
-        # Inicializa com o modelo padrão seguro
         gemini_model = genai.GenerativeModel(
             GEMINI_MODEL_NAME,
             safety_settings=safety_settings,
