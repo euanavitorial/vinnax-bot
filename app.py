@@ -6,10 +6,10 @@ from typing import Any, Dict, List, Callable
 from flask import Flask, request, jsonify
 import requests
 
-# --- IMPORTAÇÃO DA NOVA VERSÃO DO SDK ---
+# --- IMPORTAÇÃO PADRÃO ---
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
-# ----------------------------------------
+# -------------------------
 
 # ====== Config (via variáveis de ambiente) ======
 EVOLUTION_KEY = os.environ.get("EVOLUTION_KEY", "")
@@ -18,8 +18,7 @@ EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# [SOLUÇÃO FINAL] Usando o modelo PRO com a biblioteca atualizada (>=0.9.0)
-# Isso resolve o erro 404.
+# [MODELO SEGURO] Usamos gemini-pro pois funciona na versão 0.8.5 sem erro 404
 GEMINI_MODEL_NAME = "gemini-pro"
 
 # --- CONFIGURAÇÃO DO SUPABASE ---
@@ -53,7 +52,6 @@ def extract_text(message: Dict[str, Any]) -> str:
     return ""
 
 def get_auth_headers():
-    """Autenticação correta para Supabase (Bearer Token)"""
     return {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
@@ -154,7 +152,6 @@ def call_api_consultar_cliente_por_telefone(telefone: str) -> Dict[str, Any]:
     if not (SUPABASE_SERVICE_ROLE_KEY and CLIENTE_API_ENDPOINT): 
         return {"status": "erro", "mensagem": "API de Cliente não configurada."}
     try:
-        # POST para filtrar por telefone (Padrão Supabase Edge Functions)
         response = requests.post(
             CLIENTE_API_ENDPOINT,
             headers=get_auth_headers(),
@@ -192,10 +189,6 @@ def call_api_excluir_cliente(id_cliente: int) -> Dict[str, Any]:
         return response.json()
     except Exception as e: return {"status": "erro", "mensagem": f"Erro ao excluir cliente: {e}"}
 
-
-# ======================================================================
-# PASSO 3: O ROTEADOR
-# ======================================================================
 TOOL_ROUTER: Dict[str, Callable[..., Dict[str, Any]]] = {
     "criar_cliente": call_api_criar_cliente,
     "consultar_cliente_por_id": call_api_consultar_cliente_por_id,
@@ -210,15 +203,15 @@ if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         
-        # Log de diagnóstico
+        # Diagnóstico de modelos
         try:
             app.logger.info("=== MODELOS DISPONÍVEIS ===")
             for m in genai.list_models():
                 if 'generateContent' in m.supported_generation_methods:
                     app.logger.info(f"✅ {m.name}")
             app.logger.info("============================")
-        except Exception as e:
-            app.logger.warning(f"Erro listando modelos: {e}")
+        except Exception:
+            pass
 
         safety_settings = {
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
@@ -238,10 +231,7 @@ if GEMINI_API_KEY:
 else:
     app.logger.warning("[GEMINI] GEMINI_API_KEY não configurada.")
 
-
-# ======================================================================
-# LÓGICA DE RESPOSTA
-# ======================================================================
+# ====== Lógica de Resposta ======
 def answer_with_gemini(user_text: str, chat_history: List[str], initial_context: str = "", client_phone: str = None) -> str:
     if not gemini_model:
         return f"Olá! Recebi sua mensagem: {user_text}"
@@ -249,11 +239,8 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
     try:
         system_prompt = (
             "Você é um assistente da Vinnax Beauty. Seu objetivo é ser simpático, "
-            "profissional e ajudar o cliente. Se for o início da conversa, "
-            "cumprimente, se apresente e comece a conversa. Se o cliente já foi identificado no "
-            "CONTEXTO INICIAL, use o nome dele. Responda em português, de forma breve. "
-            "**FERRAMENTAS:** Use as ferramentas disponíveis (`tools`) sempre que o cliente solicitar uma ação (criar, consultar, excluir). "
-            "Sempre confirme os dados críticos antes de executar uma ação."
+            "profissional e ajudar o cliente. "
+            "**FERRAMENTAS:** Use as ferramentas disponíveis (`tools`) sempre que o cliente solicitar uma ação."
         )
         
         history_string = "\n".join(chat_history)
@@ -264,26 +251,21 @@ def answer_with_gemini(user_text: str, chat_history: List[str], initial_context:
             f"=== Nova Mensagem ===\nCliente: {user_text}\nAtendente:"
         )
 
-        # 1. Primeira chamada ao Gemini
         response = gemini_model.generate_content(full_prompt)
         candidate = response.candidates[0]
         
-        # 2. Verificar ferramenta
         part = candidate.content.parts[0]
         if hasattr(part, 'function_call') and part.function_call:
             app.logger.info("[GEMINI] Pedido de 'Tool Use' detectado.")
-            
             function_call = part.function_call
             tool_name = function_call.name
             tool_args = dict(function_call.args)
             
-            # 3. Usar o ROTEADOR
             if tool_name in TOOL_ROUTER:
                 app.logger.info(f"[ROUTER] Roteando para a função: '{tool_name}'")
                 function_to_call = TOOL_ROUTER[tool_name]
                 api_result = function_to_call(**tool_args)
                 
-                # 4. Segunda chamada
                 tool_response_part = {
                     "function_response": {
                         "name": tool_name,
@@ -318,14 +300,16 @@ def webhook_messages_upsert():
     envelope = raw.get("data", raw)
     if isinstance(envelope, list) and envelope: envelope = envelope[0]
     if not isinstance(envelope, dict): return jsonify({"status": "bad_payload"}), 200
+    
     key = envelope.get("key", {}) or {}
     if key.get("fromMe") is True: return jsonify({"status": "own_message_ignored"}), 200
+    
     message = envelope.get("message", {}) or {}
     if not message: return jsonify({"status": "no_message_ignored"}), 200
+    
     msg_id = key.get("id") or envelope.get("idMessage") or ""
-    if msg_id:
-        if msg_id in PROCESSED_IDS: return jsonify({"status": "duplicate_ignored"}), 200
-        PROCESSED_IDS.append(msg_id)
+    if msg_id in PROCESSED_IDS: return jsonify({"status": "duplicate_ignored"}), 200
+    PROCESSED_IDS.append(msg_id)
     
     jid = (key.get("remoteJid") or envelope.get("participant") or "").strip()
     if not jid.endswith("@s.whatsapp.net"): return jsonify({"status": "non_user_ignored"}), 200
@@ -334,6 +318,7 @@ def webhook_messages_upsert():
     number = client_phone 
     text = extract_text(message).strip()
     if not text: return jsonify({"status": "no_text_ignored"}), 200
+    
     if number not in CHAT_SESSIONS: CHAT_SESSIONS[number] = []
     current_history = CHAT_SESSIONS[number]
     
