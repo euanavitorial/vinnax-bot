@@ -19,7 +19,7 @@ EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # Modelo compatível com google-generativeai==0.8.5
-GEMINI_MODEL_NAME = "gemini-1.5-flash"
+GEMINI_MODEL_NAME = "models/gemini-2.5-flash"
 
 # --- SUPABASE CONFIG ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
