@@ -6,27 +6,26 @@ from typing import Any, Dict, List, Callable
 from flask import Flask, request, jsonify
 import requests
 
-# --- IMPORTAÇÃO PADRÃO ---
+# --- IMPORTAÇÃO PADRÃO DO GEMINI ---
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
-# -------------------------
+# -----------------------------------
 
-# ====== Config (via variáveis de ambiente) ======
+# ====== VARIÁVEIS DE AMBIENTE ======
 EVOLUTION_KEY = os.environ.get("EVOLUTION_KEY", "")
 EVOLUTION_URL_BASE = os.environ.get("EVOLUTION_URL_BASE", "")
 EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# [MODELO COMPATÍVEL COM google-generativeai==0.8.5]
-# "models/gemini-1.5-flash" é estável e 100% compatível.
+# Modelo compatível com google-generativeai==0.8.5
 GEMINI_MODEL_NAME = "models/gemini-1.5-flash"
 
-# --- CONFIGURAÇÃO DO SUPABASE ---
+# --- SUPABASE CONFIG ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
-# Monta a URL da API de clientes automaticamente
+# Monta a URL da API de clientes
 if SUPABASE_URL:
     base_url = SUPABASE_URL.rstrip("/")
     CLIENTE_API_ENDPOINT = f"{base_url}/functions/v1/api-clients"
@@ -37,19 +36,22 @@ LANCAMENTO_API_ENDPOINT = os.environ.get("LANCAMENTO_API_ENDPOINT", "https://api
 
 app = Flask(__name__)
 
-# ====== Memória e Deduplicação ======
+# ====== Memória ======
 PROCESSED_IDS = deque(maxlen=500)
 CHAT_SESSIONS: Dict[str, List[str]] = {}
 CHAT_HISTORY_LENGTH = 10
 
-
-# ====== Utilidades WhatsApp ======
+# ====== Utilidades ======
 def extract_text(message: Dict[str, Any]) -> str:
-    if not isinstance(message, dict): return ""
-    if "conversation" in message: return (message.get("conversation") or "").strip()
-    if "extendedTextMessage" in message: return (message["extendedTextMessage"].get("text") or "").strip()
+    if not isinstance(message, dict):
+        return ""
+    if "conversation" in message:
+        return (message.get("conversation") or "").strip()
+    if "extendedTextMessage" in message:
+        return (message["extendedTextMessage"].get("text") or "").strip()
     for mid in ("imageMessage", "videoMessage", "documentMessage", "audioMessage"):
-        if mid in message: return (message[mid].get("caption") or "").strip()
+        if mid in message:
+            return (message[mid].get("caption") or "").strip()
     return ""
 
 def get_auth_headers():
@@ -59,147 +61,123 @@ def get_auth_headers():
         "Content-Type": "application/json"
     }
 
-
 # ======================================================================
 # FERRAMENTAS (TOOLS)
 # ======================================================================
 TOOLS_MENU = [
     {
         "name": "criar_cliente",
-        "description": "Cadastra um novo cliente no sistema. Requer nome e pelo menos telefone ou email.",
+        "description": "Cadastra um novo cliente no sistema.",
         "parameters": {
             "type_": "OBJECT",
             "properties": {
-                "nome": {"type": "STRING", "description": "Nome completo do cliente."},
-                "telefone": {"type": "STRING", "description": "Número de telefone do cliente (opcional)."},
-                "email": {"type": "STRING", "description": "Endereço de email do cliente (opcional)."}
+                "nome": {"type": "STRING", "description": "Nome do cliente."},
+                "telefone": {"type": "STRING", "description": "Telefone (opcional)."},
+                "email": {"type": "STRING", "description": "Email (opcional)."}
             },
             "required": ["nome"]
         }
     },
     {
         "name": "consultar_cliente_por_id",
-        "description": "Busca os detalhes de um cliente (telefone, email, etc.) usando o ID do cliente.",
+        "description": "Busca cliente por ID.",
         "parameters": {
             "type_": "OBJECT",
             "properties": {
-                "id_cliente": {"type": "INTEGER", "description": "O ID numérico do cliente."}
+                "id_cliente": {"type": "INTEGER", "description": "ID numérico do cliente."}
             },
             "required": ["id_cliente"]
         }
     },
     {
         "name": "consultar_cliente_por_telefone",
-        "description": "Busca os detalhes de um cliente usando o número de telefone.",
+        "description": "Busca cliente por telefone.",
         "parameters": {
             "type_": "OBJECT",
             "properties": {
-                "telefone": {"type": "STRING", "description": "Número com DDI, ex: 5511999999999."}
+                "telefone": {"type": "STRING", "description": "Número completo com DDI."}
             },
             "required": ["telefone"]
         }
     },
     {
         "name": "atualizar_cliente",
-        "description": "Modifica informações de um cliente existente usando o ID.",
+        "description": "Atualiza dados de um cliente existente.",
         "parameters": {
             "type_": "OBJECT",
             "properties": {
-                "id_cliente": {"type": "INTEGER", "description": "O ID do cliente."},
-                "nome": {"type": "STRING", "description": "Novo nome (opcional)."},
-                "telefone": {"type": "STRING", "description": "Novo telefone (opcional)."},
-                "email": {"type": "STRING", "description": "Novo email (opcional)."}
+                "id_cliente": {"type": "INTEGER"},
+                "nome": {"type": "STRING"},
+                "telefone": {"type": "STRING"},
+                "email": {"type": "STRING"}
             },
             "required": ["id_cliente"]
         }
     },
     {
         "name": "excluir_cliente",
-        "description": "Deleta um cliente do sistema usando o ID.",
+        "description": "Exclui um cliente do sistema.",
         "parameters": {
             "type_": "OBJECT",
             "properties": {
-                "id_cliente": {"type": "INTEGER", "description": "O ID do cliente a ser excluído."}
+                "id_cliente": {"type": "INTEGER"}
             },
             "required": ["id_cliente"]
         }
     }
 ]
 
-
 # ======================================================================
-# FUNÇÕES DA API
+# FUNÇÕES DA API SUPABASE
 # ======================================================================
-def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None) -> Dict[str, Any]:
+def call_api_criar_cliente(nome: str, telefone: str = None, email: str = None):
     if not (SUPABASE_SERVICE_ROLE_KEY and CLIENTE_API_ENDPOINT):
-        return {"status": "erro", "mensagem": "API de Cliente não configurada."}
+        return {"status": "erro", "mensagem": "API não configurada."}
     try:
         payload = {"name": nome, "phone": telefone, "email": email}
         payload = {k: v for k, v in payload.items() if v is not None}
-        response = requests.post(CLIENTE_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=20)
-        response.raise_for_status()
-        return response.json()
+        resp = requests.post(CLIENTE_API_ENDPOINT, json=payload, headers=get_auth_headers(), timeout=20)
+        resp.raise_for_status()
+        return resp.json()
     except Exception as e:
-        return {"status": "erro", "mensagem": f"Erro ao criar cliente: {e}"}
+        return {"status": "erro", "mensagem": str(e)}
 
-
-def call_api_consultar_cliente_por_id(id_cliente: int) -> Dict[str, Any]:
-    if not (SUPABASE_SERVICE_ROLE_KEY and CLIENTE_API_ENDPOINT):
-        return {"status": "erro", "mensagem": "API de Cliente não configurada."}
+def call_api_consultar_cliente_por_id(id_cliente: int):
     try:
-        url = f"{CLIENTE_API_ENDPOINT}/{id_cliente}"
-        response = requests.get(url, headers=get_auth_headers(), timeout=20)
-        response.raise_for_status()
-        return response.json()
+        resp = requests.get(f"{CLIENTE_API_ENDPOINT}/{id_cliente}", headers=get_auth_headers(), timeout=20)
+        resp.raise_for_status()
+        return resp.json()
     except Exception as e:
-        return {"status": "erro", "mensagem": f"Erro ao consultar cliente: {e}"}
+        return {"status": "erro", "mensagem": str(e)}
 
-
-def call_api_consultar_cliente_por_telefone(telefone: str) -> Dict[str, Any]:
-    if not (SUPABASE_SERVICE_ROLE_KEY and CLIENTE_API_ENDPOINT):
-        return {"status": "erro", "mensagem": "API de Cliente não configurada."}
+def call_api_consultar_cliente_por_telefone(telefone: str):
     try:
-        response = requests.post(CLIENTE_API_ENDPOINT, headers=get_auth_headers(), json={"phone": telefone}, timeout=20)
-        response.raise_for_status()
-        dados = response.json()
-        if isinstance(dados, list):
-            if dados:
-                return dados[0]
-            return {"status": "nao_encontrado", "mensagem": f"Nenhum cliente encontrado com o telefone {telefone}."}
-        return dados
+        resp = requests.post(CLIENTE_API_ENDPOINT, json={"phone": telefone}, headers=get_auth_headers(), timeout=20)
+        resp.raise_for_status()
+        dados = resp.json()
+        if isinstance(dados, list) and not dados:
+            return {"status": "nao_encontrado", "mensagem": f"Nenhum cliente com {telefone}"}
+        return dados[0] if isinstance(dados, list) else dados
     except Exception as e:
-        return {"status": "erro", "mensagem": f"Erro ao consultar cliente por telefone: {e}"}
+        return {"status": "erro", "mensagem": str(e)}
 
-
-def call_api_atualizar_cliente(id_cliente: int, nome: str = None, telefone: str = None, email: str = None) -> Dict[str, Any]:
-    if not (SUPABASE_SERVICE_ROLE_KEY and CLIENTE_API_ENDPOINT):
-        return {"status": "erro", "mensagem": "API de Cliente não configurada."}
+def call_api_atualizar_cliente(id_cliente: int, nome=None, telefone=None, email=None):
     try:
-        url = f"{CLIENTE_API_ENDPOINT}/{id_cliente}"
-        payload = {"name": nome, "phone": telefone, "email": email}
-        payload = {k: v for k, v in payload.items() if v is not None}
-        response = requests.put(url, json=payload, headers=get_auth_headers(), timeout=20)
-        response.raise_for_status()
-        return response.json()
+        payload = {k: v for k, v in {"name": nome, "phone": telefone, "email": email}.items() if v}
+        resp = requests.put(f"{CLIENTE_API_ENDPOINT}/{id_cliente}", json=payload, headers=get_auth_headers(), timeout=20)
+        resp.raise_for_status()
+        return resp.json()
     except Exception as e:
-        return {"status": "erro", "mensagem": f"Erro ao atualizar cliente: {e}"}
+        return {"status": "erro", "mensagem": str(e)}
 
-
-def call_api_excluir_cliente(id_cliente: int) -> Dict[str, Any]:
-    if not (SUPABASE_SERVICE_ROLE_KEY and CLIENTE_API_ENDPOINT):
-        return {"status": "erro", "mensagem": "API de Cliente não configurada."}
+def call_api_excluir_cliente(id_cliente: int):
     try:
-        url = f"{CLIENTE_API_ENDPOINT}/{id_cliente}"
-        response = requests.delete(url, headers=get_auth_headers(), timeout=20)
-        response.raise_for_status()
-        if response.status_code == 204:
-            return {"status": "sucesso", "mensagem": f"Cliente ID {id_cliente} excluído com sucesso."}
-        return response.json()
+        resp = requests.delete(f"{CLIENTE_API_ENDPOINT}/{id_cliente}", headers=get_auth_headers(), timeout=20)
+        return {"status": "sucesso" if resp.status_code == 204 else "erro", "mensagem": resp.text}
     except Exception as e:
-        return {"status": "erro", "mensagem": f"Erro ao excluir cliente: {e}"}
+        return {"status": "erro", "mensagem": str(e)}
 
-
-TOOL_ROUTER: Dict[str, Callable[..., Dict[str, Any]]] = {
+TOOL_ROUTER = {
     "criar_cliente": call_api_criar_cliente,
     "consultar_cliente_por_id": call_api_consultar_cliente_por_id,
     "consultar_cliente_por_telefone": call_api_consultar_cliente_por_telefone,
@@ -207,38 +185,104 @@ TOOL_ROUTER: Dict[str, Callable[..., Dict[str, Any]]] = {
     "excluir_cliente": call_api_excluir_cliente,
 }
 
-
-# ====== Inicialização do Gemini ======
+# ======================================================================
+# GEMINI CONFIGURAÇÃO
+# ======================================================================
 gemini_model = None
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-
-        # Diagnóstico de modelos
-        try:
-            app.logger.info("=== MODELOS DISPONÍVEIS ===")
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    app.logger.info(f"✅ {m.name}")
-            app.logger.info("============================")
-        except Exception:
-            pass
-
-        safety_settings = {
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-        }
-
         gemini_model = genai.GenerativeModel(
             GEMINI_MODEL_NAME,
-            safety_settings=safety_settings,
+            safety_settings={
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+            },
             tools=TOOLS_MENU
         )
         app.logger.info(f"[GEMINI] Modelo carregado: {GEMINI_MODEL_NAME}")
-
     except Exception as e:
-        app.logger.exception(f"[GEMINI] Erro ao inicializar SDK: {e}")
+        app.logger.exception(f"[GEMINI] Erro ao iniciar: {e}")
 else:
     app.logger.warning("[GEMINI] GEMINI_API_KEY não configurada.")
+
+# ======================================================================
+# GERAÇÃO DE RESPOSTA
+# ======================================================================
+def answer_with_gemini(user_text: str, chat_history: List[str], initial_context: str = "", client_phone: str = None):
+    if not gemini_model:
+        return f"Olá! Recebi sua mensagem: {user_text}"
+    try:
+        system_prompt = (
+            "Você é um assistente da Vinnax Beauty. "
+            "Responda com simpatia e profissionalismo. "
+            "Use ferramentas apenas se o cliente pedir algo do sistema."
+        )
+        history_string = "\n".join(chat_history)
+        prompt = f"{system_prompt}\n{initial_context}\nHistórico:\n{history_string}\nCliente: {user_text}\nAtendente:"
+        resp = gemini_model.generate_content(prompt)
+        return resp.candidates[0].content.parts[0].text.strip()
+    except Exception as e:
+        app.logger.exception(f"[GEMINI] Erro: {e}")
+        return "Desculpe, ocorreu um erro interno."
+
+# ======================================================================
+# ROTAS DO FLASK
+# ======================================================================
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({"status": "ok", "service": "vinnax-bot"}), 200
+
+@app.route("/webhook/messages-upsert", methods=["POST"])
+def webhook_messages_upsert():
+    raw = request.get_json(silent=True) or {}
+    envelope = raw.get("data", raw)
+    if isinstance(envelope, list) and envelope:
+        envelope = envelope[0]
+
+    key = envelope.get("key", {}) or {}
+    if key.get("fromMe") is True:
+        return jsonify({"status": "own_message_ignored"}), 200
+
+    message = envelope.get("message", {}) or {}
+    msg_id = key.get("id") or envelope.get("idMessage") or ""
+    if msg_id in PROCESSED_IDS:
+        return jsonify({"status": "duplicate_ignored"}), 200
+    PROCESSED_IDS.append(msg_id)
+
+    jid = (key.get("remoteJid") or envelope.get("participant") or "").strip()
+    if not jid.endswith("@s.whatsapp.net"):
+        return jsonify({"status": "ignored"}), 200
+    client_phone = jid.replace("@s.whatsapp.net", "")
+
+    text = extract_text(message).strip()
+    if not text:
+        return jsonify({"status": "no_text"}), 200
+
+    if client_phone not in CHAT_SESSIONS:
+        CHAT_SESSIONS[client_phone] = []
+    current_history = CHAT_SESSIONS[client_phone]
+
+    reply = answer_with_gemini(text, current_history, "", client_phone)
+
+    CHAT_SESSIONS[client_phone].append(f"Cliente: {text}")
+    CHAT_SESSIONS[client_phone].append(f"Atendente: {reply}")
+
+    if EVOLUTION_KEY and EVOLUTION_URL_BASE and EVOLUTION_INSTANCE:
+        try:
+            url_send = f"{EVOLUTION_URL_BASE}/message/sendtext/{EVOLUTION_INSTANCE}"
+            headers = {"apikey": EVOLUTION_KEY, "Content-Type": "application/json"}
+            payload = {"number": client_phone, "text": reply}
+            requests.post(url_send, json=payload, headers=headers, timeout=20)
+        except Exception as e:
+            app.logger.exception(f"[EVOLUTION] Falha ao enviar: {e}")
+
+    return jsonify({"status": "ok"}), 200
+
+# ======================================================================
+# EXECUÇÃO LOCAL (para testes)
+# ======================================================================
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
