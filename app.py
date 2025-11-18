@@ -208,9 +208,9 @@ else:
 
 
 # ======================================================================
-# LÓGICA DE RESPOSTA DO BOT
+# LÓGICA DE RESPOSTA DO BOT (CORRIGIDA PARA ACEITAR client_phone)
 # ======================================================================
-def answer_with_gemini(user_text: str, chat_history: List[str], initial_context: str = "") -> str:
+def answer_with_gemini(user_text: str, chat_history: List[str], initial_context: str = "", client_phone: str = None) -> str:
     if not gemini_model:
         return f"Olá! Recebi sua mensagem: {user_text}"
 
@@ -290,7 +290,6 @@ def home():
 
 @app.route("/webhook/messages-upsert", methods=["POST"])
 def webhook_messages_upsert():
-    # ... (O MESMO CÓDIGO DE ANTES) ...
     raw = request.get_json(silent=True) or {}
     envelope = raw.get("data", raw)
     if isinstance(envelope, list) and envelope: envelope = envelope[0]
@@ -329,7 +328,8 @@ def webhook_messages_upsert():
             initial_context = f"CONTEXTO INICIAL: O número de telefone {client_phone} pertence ao cliente '{client_name}' (ID {search_result.get('id')}). O bot DEVE usar o nome do cliente na resposta e NÃO DEVE perguntar o telefone novamente."
     
     # 3. Geração da Resposta
-    reply = answer_with_gemini(text, current_history, initial_context, client_phone) # Passando client_phone
+    # AQUI ESTAVA O ERRO: Agora a função aceita o client_phone
+    reply = answer_with_gemini(text, current_history, initial_context, client_phone) 
     
     # 4. Salvamento da Memória
     CHAT_SESSIONS[number].append(f"Cliente: {text}")
@@ -351,4 +351,3 @@ def webhook_messages_upsert():
     except Exception as e:
         app.logger.exception(f"[EVOLUTION] Erro ao enviar: {e}")
     return jsonify({"status": "ok"}), 200
-    
