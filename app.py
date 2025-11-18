@@ -17,7 +17,9 @@ EVOLUTION_URL_BASE = os.environ.get("EVOLUTION_URL_BASE", "")
 EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "models/gemini-1.5-pro-latest")
+
+# --- CORREÇÃO AQUI: Mudamos para o modelo "flash" que é mais rápido e estável ---
+GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
 
 LOVABLE_API_KEY = os.environ.get("LOVABLE_API_KEY", "") 
 CLIENTE_API_ENDPOINT = os.environ.get("CLIENTE_API_ENDPOINT", "https://ebiitbpdvskreiuoeyaz.supabase.co/functions/v1/api-clients")
@@ -186,14 +188,13 @@ TOOL_ROUTER: Dict[str, Callable[..., Dict[str, Any]]] = {
     "excluir_cliente": call_api_excluir_cliente,
 }
 
-# ====== Inicialização do Gemini (CORRIGIDA AQUI) ======
+# ====== Inicialização do Gemini ======
 gemini_model = None
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         
-        # CORREÇÃO: Definindo explicitamente as 4 categorias principais
-        # para evitar erros com categorias novas ou não suportadas (Erro 400).
+        # Definição manual das categorias de segurança (Evita erro 400)
         safety_settings = {
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
             HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -206,7 +207,7 @@ if GEMINI_API_KEY:
             safety_settings=safety_settings,
             tools=TOOLS_MENU
         )
-        app.logger.info(f"[GEMINI] Modelo carregado com {len(TOOLS_MENU)} ferramentas.")
+        app.logger.info(f"[GEMINI] Modelo carregado: {GEMINI_MODEL_NAME}")
     except Exception as e:
         app.logger.exception(f"[GEMINI] Erro ao inicializar SDK: {e}")
 else:
