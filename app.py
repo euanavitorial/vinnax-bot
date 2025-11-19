@@ -15,15 +15,13 @@ EVOLUTION_KEY = os.environ.get("EVOLUTION_KEY", "")
 EVOLUTION_URL_BASE = os.environ.get("EVOLUTION_URL_BASE", "")
 EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 
-EXTERNAL_AI_PROXY = f"{SUPABASE_URL}/functions/v1/external-ai-proxy"
 GEMINI_MODEL_NAME = "models/gemini-2.5-flash"
 
 app = Flask(__name__)
 
 # ============================================================
-# MEMÓRIA DE CONVERSA
+# MEMÓRIA DE CONVERSA E DEDUPLICAÇÃO
 # ============================================================
 PROCESSED_IDS = deque(maxlen=500)
 CHAT_SESSIONS: Dict[str, List[str]] = {}
@@ -62,9 +60,9 @@ def answer_with_gemini(user_text: str, chat_history: List[str]) -> str:
         history = "\n".join(chat_history)
         prompt = (
             "Você é o assistente da Vinnax Beauty. "
-            "Fale de forma simpática e natural. "
-            "Se for uma solicitação administrativa (ex: criar cliente, orçamento, buscar produtos), "
-            "resuma a intenção em um formato JSON no final da resposta no campo 'action'.\n\n"
+            "Responda de forma simpática, natural e breve. "
+            "Se o cliente fizer uma pergunta sobre produtos, agendamentos ou orçamentos, responda com naturalidade. "
+            "Se for algo administrativo, apenas resuma a intenção no final como JSON em 'action'.\n\n"
             f"Histórico:\n{history}\nUsuário: {user_text}\nAssistente:"
         )
         response = gemini_model.generate_content(prompt)
@@ -72,6 +70,26 @@ def answer_with_gemini(user_text: str, chat_history: List[str]) -> str:
     except Exception as e:
         app.logger.exception(f"[GEMINI] Erro: {e}")
         return f"Erro interno: {e}"
+
+# ============================================================
+# FUNÇÃO PARA ENVIAR MENSAGEM VIA EVOLUTION API
+# ============================================================
+
+def send_message_to_evolution(number: str, text: str) -> bool:
+    try:
+        url = f"{EVOLUTION_URL_BASE}/message/sendtext/{EVOLUTION_INSTANCE}"
+        headers = {"apikey": EVOLUTION_KEY, "Content-Type": "application/json"}
+        body = {"number": number, "text": text}
+        resp = requests.post(url, headers=headers, json=body, timeout=10)
+        if resp.ok:
+            app.logger.info(f"[EVOLUTION] Mensagem enviada com sucesso para {number}")
+            return True
+        else:
+            app.logger.error(f"[EVOLUTION] Falha ao enviar mensagem ({resp.status_code}): {resp.text}")
+            return False
+    except Exception as e:
+        app.logger.exception(f"[EVOLUTION] Erro ao enviar mensagem: {e}")
+        return False
 
 # ============================================================
 # ROTAS BÁSICAS
@@ -91,42 +109,51 @@ def test_ai():
     return jsonify({"reply": reply}), 200
 
 # ============================================================
-# ENDPOINT PRINCIPAL — SEM AUTENTICAÇÃO PARA TESTE
+# ROTA PRINCIPAL - /api/ai (com deduplicação + envio via Evolution)
 # ============================================================
 
 @app.route("/api/ai", methods=["POST"])
 def api_ai():
-    """Recebe requisições do Supabase, Evolution ou testes manuais via ReqBin"""
     try:
         data = request.get_json(force=True)
-        app.logger.info(f"🔹 Requisição recebida: {data}")
+        app.logger.info(f"📩 Webhook recebido: {data}")
 
-        user_message = (
-            data.get("messageText")
-            or data.get("message")
-            or data.get("text")
-            or ""
-        )
-        phone = data.get("phoneNumber") or "desconhecido"
-        contact_name = data.get("contactName") or "Cliente"
+        # Extrai campos principais
+        message_id = str(data.get("id") or data.get("messageId") or f"{data.get('phoneNumber')}-{data.get('timestamp', '')}")
+        phone = data.get("phoneNumber")
+        user_message = data.get("messageText") or data.get("text") or data.get("message") or ""
+        contact_name = data.get("contactName", "Cliente")
 
-        if not user_message:
-            return jsonify({"error": "Campo 'messageText' ou 'text' é obrigatório."}), 400
+        # Deduplicação
+        if message_id in PROCESSED_IDS:
+            app.logger.info(f"⚠️ Ignorando mensagem duplicada: {message_id}")
+            return jsonify({"ok": True, "duplicate": True}), 200
+        PROCESSED_IDS.append(message_id)
 
+        # Validação básica
+        if not phone or not user_message:
+            return jsonify({"error": "Campos obrigatórios ausentes."}), 400
+
+        # Recupera histórico
         history = CHAT_SESSIONS.get(phone, [])
+
+        # Gera resposta com Gemini
         reply_text = answer_with_gemini(user_message, history)
 
+        # Atualiza histórico
         history.append(f"{contact_name}: {user_message}")
         history.append(f"IA: {reply_text}")
         CHAT_SESSIONS[phone] = history[-CHAT_HISTORY_LENGTH:]
 
+        # Envia mensagem pro cliente via Evolution API
+        send_message_to_evolution(phone, reply_text)
+
+        # Retorna log interno
         return jsonify({
             "ok": True,
-            "aiMessage": reply_text,
-            "conversationId": data.get("conversationId", ""),
-            "phoneNumber": phone,
-            "contactName": contact_name,
-            "instance": data.get("instance", ""),
+            "messageId": message_id,
+            "sent_to": phone,
+            "reply": reply_text
         }), 200
 
     except Exception as e:
