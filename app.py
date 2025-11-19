@@ -64,8 +64,10 @@ def answer_with_gemini(user_text: str, chat_history: List[str]) -> str:
         prompt = (
             "Você é o assistente da Vinnax Beauty. "
             "Fale de forma simpática e natural. "
-            "Analise o texto e, se for uma solicitação de ação administrativa (como criar cliente, gerar orçamento, buscar produtos, etc.), "
-            "resuma a intenção em um formato JSON no final da resposta, no campo 'action', apenas se for necessário executar algo.\n\n"
+            "Analise o texto e, se for uma solicitação de ação administrativa "
+            "(como criar cliente, gerar orçamento, buscar produtos, etc.), "
+            "resuma a intenção em um formato JSON no final da resposta no campo 'action', "
+            "apenas se for necessário executar algo.\n\n"
             f"Histórico:\n{history}\nUsuário: {user_text}\nAssistente:"
         )
         response = gemini_model.generate_content(prompt)
@@ -116,46 +118,66 @@ def test_ai():
 
 @app.route("/api/ai", methods=["POST"])
 def api_ai():
-    """Recebe requisições do Supabase, processa via Gemini e envia ao proxy Lovable."""
+    """Recebe requisições do Supabase, processa via Gemini e responde com texto natural."""
     try:
+        # Valida API key
+        api_key = request.headers.get("x-api-key")
+        if api_key != LOVABLE_API_KEY:
+            return jsonify({"error": "unauthorized"}), 401
+
+        # Lê JSON corretamente
+        if not request.is_json:
+            return jsonify({"error": "expected JSON body"}), 400
+
         data = request.get_json(force=True)
-        user_message = data.get("message") or data.get("text") or ""
-        client_id = data.get("client_id")
-        phone = data.get("phone")
+
+        # Aceita múltiplos formatos de campo
+        user_message = (
+            data.get("messageText") or
+            data.get("message") or
+            data.get("text") or
+            ""
+        )
+        phone = (
+            data.get("phoneNumber") or
+            data.get("phone") or
+            data.get("number") or
+            "default"
+        )
+        contact_name = data.get("contactName") or data.get("name") or "Cliente"
+        instance = data.get("instance") or ""
+        conversation_id = data.get("conversationId") or data.get("client_id")
+        photo_url = data.get("photoUrl")
 
         if not user_message:
-            return jsonify({"error": "Campo 'message' ou 'text' é obrigatório."}), 400
+            return jsonify({"error": "Campo 'messageText' é obrigatório."}), 400
 
-        # Recupera histórico do cliente (se existir)
-        history = CHAT_SESSIONS.get(phone or "default", [])
+        # Recupera histórico
+        history = CHAT_SESSIONS.get(phone, [])
 
-        # Gera resposta com o Gemini
+        # Gera resposta com Gemini
         reply_text = answer_with_gemini(user_message, history)
 
         # Atualiza histórico local
-        history.append(f"Cliente: {user_message}")
-        history.append(f"Atendente: {reply_text}")
-        CHAT_SESSIONS[phone or "default"] = history[-CHAT_HISTORY_LENGTH:]
+        history.append(f"{contact_name}: {user_message}")
+        history.append(f"Assistente: {reply_text}")
+        CHAT_SESSIONS[phone] = history[-CHAT_HISTORY_LENGTH:]
 
-        # Tenta detectar se há JSON embutido no final (ação sugerida)
-        action_payload = None
-        if "{" in reply_text and "}" in reply_text:
-            try:
-                action_payload = json.loads(reply_text[reply_text.index("{"):])
-            except Exception:
-                pass
+        # Monta resposta
+        response_json = {
+            "ok": True,
+            "conversationId": conversation_id,
+            "phoneNumber": phone,
+            "aiMessage": reply_text,
+            "conversation": reply_text,
+            "response": reply_text,
+            "text": reply_text,
+            "contactName": contact_name,
+            "instance": instance,
+            "photoUrl": photo_url,
+        }
 
-        # Caso o Gemini tenha sugerido uma ação, repassa ao proxy
-        proxy_result = None
-        if action_payload:
-            proxy_result = call_lovable_proxy(action_payload)
-
-        # Monta a resposta final
-        return jsonify({
-            "reply": reply_text,
-            "action": action_payload or None,
-            "proxy_result": proxy_result or None
-        }), 200
+        return jsonify(response_json), 200
 
     except Exception as e:
         app.logger.exception(f"[API AI] Erro geral: {e}")
