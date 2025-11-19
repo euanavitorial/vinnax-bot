@@ -15,7 +15,6 @@ EVOLUTION_KEY = os.environ.get("EVOLUTION_KEY", "")
 EVOLUTION_URL_BASE = os.environ.get("EVOLUTION_URL_BASE", "")
 EVOLUTION_INSTANCE = os.environ.get("EVOLUTION_INSTANCE", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-LOVABLE_API_KEY = os.environ.get("LOVABLE_API_KEY", "")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 
 EXTERNAL_AI_PROXY = f"{SUPABASE_URL}/functions/v1/external-ai-proxy"
@@ -53,7 +52,7 @@ else:
     app.logger.warning("[GEMINI] GEMINI_API_KEY não configurada.")
 
 # ============================================================
-# FUNÇÃO DE RESPOSTA NATURAL COM GEMINI
+# FUNÇÃO DE RESPOSTA COM GEMINI
 # ============================================================
 
 def answer_with_gemini(user_text: str, chat_history: List[str]) -> str:
@@ -64,10 +63,8 @@ def answer_with_gemini(user_text: str, chat_history: List[str]) -> str:
         prompt = (
             "Você é o assistente da Vinnax Beauty. "
             "Fale de forma simpática e natural. "
-            "Analise o texto e, se for uma solicitação de ação administrativa "
-            "(como criar cliente, gerar orçamento, buscar produtos, etc.), "
-            "resuma a intenção em um formato JSON no final da resposta no campo 'action', "
-            "apenas se for necessário executar algo.\n\n"
+            "Se for uma solicitação administrativa (ex: criar cliente, orçamento, buscar produtos), "
+            "resuma a intenção em um formato JSON no final da resposta no campo 'action'.\n\n"
             f"Histórico:\n{history}\nUsuário: {user_text}\nAssistente:"
         )
         response = gemini_model.generate_content(prompt)
@@ -77,31 +74,12 @@ def answer_with_gemini(user_text: str, chat_history: List[str]) -> str:
         return f"Erro interno: {e}"
 
 # ============================================================
-# INTEGRAÇÃO COM LOVABLE VIA EXTERNAL-AI-PROXY
-# ============================================================
-
-def call_lovable_proxy(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Encaminha a intenção para o proxy seguro do Supabase."""
-    try:
-        headers = {
-            "x-api-key": LOVABLE_API_KEY,
-            "Content-Type": "application/json"
-        }
-        r = requests.post(EXTERNAL_AI_PROXY, headers=headers, json=payload, timeout=30)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        app.logger.exception(f"[LOVABLE] Erro ao chamar external-ai-proxy: {e}")
-        return {"status": "erro", "mensagem": str(e)}
-
-# ============================================================
 # ROTAS BÁSICAS
 # ============================================================
 
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"service": "vinnax-bot", "status": "ok"}), 200
-
 
 @app.route("/test-ai", methods=["POST"])
 def test_ai():
@@ -113,71 +91,43 @@ def test_ai():
     return jsonify({"reply": reply}), 200
 
 # ============================================================
-# NOVO ENDPOINT: /api/ai (INTEGRAÇÃO SUPABASE)
+# ENDPOINT PRINCIPAL — SEM AUTENTICAÇÃO PARA TESTE
 # ============================================================
 
 @app.route("/api/ai", methods=["POST"])
 def api_ai():
-    """Recebe requisições do Supabase, processa via Gemini e responde com texto natural."""
+    """Recebe requisições do Supabase, Evolution ou testes manuais via ReqBin"""
     try:
-        # Valida API key
-        api_key = request.headers.get("x-api-key")
-        if api_key != LOVABLE_API_KEY:
-            return jsonify({"error": "unauthorized"}), 401
-
-        # Lê JSON corretamente
-        if not request.is_json:
-            return jsonify({"error": "expected JSON body"}), 400
-
         data = request.get_json(force=True)
+        app.logger.info(f"🔹 Requisição recebida: {data}")
 
-        # Aceita múltiplos formatos de campo
         user_message = (
-            data.get("messageText") or
-            data.get("message") or
-            data.get("text") or
-            ""
+            data.get("messageText")
+            or data.get("message")
+            or data.get("text")
+            or ""
         )
-        phone = (
-            data.get("phoneNumber") or
-            data.get("phone") or
-            data.get("number") or
-            "default"
-        )
-        contact_name = data.get("contactName") or data.get("name") or "Cliente"
-        instance = data.get("instance") or ""
-        conversation_id = data.get("conversationId") or data.get("client_id")
-        photo_url = data.get("photoUrl")
+        phone = data.get("phoneNumber") or "desconhecido"
+        contact_name = data.get("contactName") or "Cliente"
 
         if not user_message:
-            return jsonify({"error": "Campo 'messageText' é obrigatório."}), 400
+            return jsonify({"error": "Campo 'messageText' ou 'text' é obrigatório."}), 400
 
-        # Recupera histórico
         history = CHAT_SESSIONS.get(phone, [])
-
-        # Gera resposta com Gemini
         reply_text = answer_with_gemini(user_message, history)
 
-        # Atualiza histórico local
         history.append(f"{contact_name}: {user_message}")
-        history.append(f"Assistente: {reply_text}")
+        history.append(f"IA: {reply_text}")
         CHAT_SESSIONS[phone] = history[-CHAT_HISTORY_LENGTH:]
 
-        # Monta resposta
-        response_json = {
+        return jsonify({
             "ok": True,
-            "conversationId": conversation_id,
-            "phoneNumber": phone,
             "aiMessage": reply_text,
-            "conversation": reply_text,
-            "response": reply_text,
-            "text": reply_text,
+            "conversationId": data.get("conversationId", ""),
+            "phoneNumber": phone,
             "contactName": contact_name,
-            "instance": instance,
-            "photoUrl": photo_url,
-        }
-
-        return jsonify(response_json), 200
+            "instance": data.get("instance", ""),
+        }), 200
 
     except Exception as e:
         app.logger.exception(f"[API AI] Erro geral: {e}")
